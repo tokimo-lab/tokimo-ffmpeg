@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
-use ffmpeg_tool::{DirectInput, ImageFormat, VideoScreenshotOptions, capture_video_screenshot_direct};
+use tokimo_package_ffmpeg::{DirectInput, ImageFormat, VideoScreenshotOptions, capture_video_screenshot_direct};
 use tokimo_vfs::Vfs;
 use tokimo_vfs::drivers::smb::factory as smb_factory;
 use tokimo_vfs_op::{StorageManager, StorageMount};

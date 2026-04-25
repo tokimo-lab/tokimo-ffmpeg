@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 /// Set to `true` from any thread to request clean shutdown.
 ///
 /// ```rust,no_run
-/// use ffmpeg_tool::transcode::{CancellationToken, cancellation_token, TranscodeOptions, transcode};
+/// use tokimo_package_ffmpeg::transcode::{CancellationToken, cancellation_token, TranscodeOptions, transcode};
 /// let cancel = cancellation_token();
 /// let opts = TranscodeOptions { cancel: Some(cancel.clone()), ..Default::default() };
 /// std::thread::spawn(move || transcode(&opts));
