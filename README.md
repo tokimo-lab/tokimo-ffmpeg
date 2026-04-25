@@ -1,4 +1,4 @@
-# tokimo-ffmpeg
+# tokimo-package-ffmpeg
 
 High-performance media transcoding library and CLI tool, built on Rust FFI bindings to a patched FFmpeg. Implements a composable 3-stage hardware pipeline — decode, filter, encode — each stage independently configurable with automatic cross-device interop.
 

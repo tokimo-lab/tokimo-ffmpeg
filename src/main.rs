@@ -1,5 +1,5 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::unwrap_in_result)]
-use ffmpeg_tool::{media::probe, transcode};
+use tokimo_package_ffmpeg::{media::probe, transcode};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
