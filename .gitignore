@@ -1,0 +1,12 @@
+# Git-ignored build artifacts
+ffmpeg-src/
+build/
+install
+install/
+third-party/
+patches/*.patch
+target/
+*.mkv
+*.mkv:Zone.Identifier
+vstats*.log
+.cargo/config.toml

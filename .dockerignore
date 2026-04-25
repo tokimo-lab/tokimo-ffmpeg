@@ -1,0 +1,7 @@
+# Exclude build artifacts and large directories from Docker build context
+ffmpeg-src/
+build/
+install/
+third-party/
+rsmpeg/
+.git/
