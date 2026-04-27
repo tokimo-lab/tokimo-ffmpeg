@@ -411,12 +411,23 @@ jobs:
 
       - name: cargo fmt / clippy / build / test
         env:
-          # rsmpeg's build script reads these to locate FFmpeg headers + libs.
-          # Mixed unix/windows paths confuse pkg-config on mingw, so we set
-          # PKG_CONFIG_PATH after cd-ing and using $(pwd) (msys2 unix-style).
-          FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
+          # rusty_ffmpeg's build.rs on target_os = "windows" only honors
+          # FFMPEG_LIBS_DIR (+ FFMPEG_INCLUDE_DIR for bindgen) — the
+          # `link_system_ffmpeg` feature path is gated to non-Windows,
+          # so PKG_CONFIG_PATH alone is not enough and configure panics
+          # with "No linking method set!".
+          #
+          # Point all three at our just-built install/ tree. We built
+          # shared (.dll.a + .dll), so FFMPEG_LINK_MODE=dynamic; the
+          # default would otherwise be Static and rustc would look for
+          # nonexistent libavcodec.lib static archives.
+          FFMPEG_LIBS_DIR: ${{ github.workspace }}\install\lib
           FFMPEG_INCLUDE_DIR: ${{ github.workspace }}\install\include
-          FFMPEG_DYN_DIR: ${{ github.workspace }}\install\lib
+          FFMPEG_DLL_PATH: ${{ github.workspace }}\install\bin
+          FFMPEG_LINK_MODE: dynamic
+          # Kept so any other downstream crate (rsmpeg, etc.) that does
+          # consult pkg-config still finds our build.
+          FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
         run: |
           set -euo pipefail
           export PKG_CONFIG_PATH="$(pwd)/install/lib/pkgconfig:/clang64/lib/pkgconfig"
