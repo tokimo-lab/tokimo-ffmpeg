@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tokimo <tokimo@localhost>
+Date: Thu, 1 Jan 2025 00:00:00 +0000
+Subject: [PATCH 1/2] libavformat/mov: fix tile index mapping with
+ tile_idx_list
+
+Backport the tile_idx_list fix from upstream FFmpeg.
+
+The jellyfin-ffmpeg mov.c sets AVStreamGroupTileGrid.offsets[i].idx
+incorrectly:
+  - read_image_grid(): offsets[i].idx = i (loop counter, wrong for
+    non-sequential tiles)
+  - read_image_iovl(): offsets[i].idx = st->index (global stream index,
+    should be group-local)
+
+This patch adds a tile_idx_list array to HEIFGrid that records each
+tile's position within the AVStreamGroup. When adding a stream via
+avformat_stream_group_add_stream(), if EEXIST is returned, the actual
+group-local index is found by searching the group's streams array.
+
+Also fixes error handling in mov_read_iref_dimg() to properly clean up
+on failure and defers nb_heif_grid increment until parsing succeeds.
+---
+--- a/libavformat/isom.h	2026-03-30 14:41:57.036568299 +0800
++++ b/libavformat/isom.h	2026-03-30 14:31:59.555184590 +0800
+@@ -289,10 +289,11 @@
+ 
+ typedef struct HEIFGrid {
+     HEIFItem *item;
+     HEIFItem **tile_item_list;
+     int16_t *tile_id_list;
++    unsigned *tile_idx_list;
+     int nb_tiles;
+ } HEIFGrid;
+ 
+ typedef struct MOVContext {
+     const AVClass *class; ///< class for private options
+--- a/libavformat/mov.c	2026-03-30 14:41:57.036568299 +0800
++++ b/libavformat/mov.c	2026-03-30 14:32:24.714395035 +0800
+@@ -8838,10 +8838,11 @@
+ {
+     HEIFItem *item = NULL;
+     HEIFGrid *grid;
+     int entries, i;
+     int from_item_id = version ? avio_rb32(pb) : avio_rb16(pb);
++    int ret = 0;
+ 
+     for (int i = 0; i < c->nb_heif_grid; i++) {
+         if (c->heif_grid[i].item->item_id == from_item_id) {
+             av_log(c->fc, AV_LOG_ERROR, "More than one 'dimg' box "
+                                         "referencing the same Derived Image item\n");
+@@ -8872,27 +8873,44 @@
+     grid = av_realloc_array(c->heif_grid, c->nb_heif_grid + 1U,
+                             sizeof(*c->heif_grid));
+     if (!grid)
+         return AVERROR(ENOMEM);
+     c->heif_grid = grid;
+-    grid = &grid[c->nb_heif_grid++];
++    grid = &grid[c->nb_heif_grid];
+ 
+     entries = avio_rb16(pb);
+     grid->tile_id_list = av_malloc_array(entries, sizeof(*grid->tile_id_list));
++    grid->tile_idx_list = av_calloc(entries, sizeof(*grid->tile_idx_list));
+     grid->tile_item_list = av_calloc(entries, sizeof(*grid->tile_item_list));
+-    if (!grid->tile_id_list || !grid->tile_item_list)
+-        return AVERROR(ENOMEM);
++    if (!grid->tile_id_list || !grid->tile_item_list || !grid->tile_idx_list) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
+     /* 'to' item ids */
+-    for (i = 0; i < entries; i++)
++    for (i = 0; i < entries; i++) {
+         grid->tile_id_list[i] = version ? avio_rb32(pb) : avio_rb16(pb);
++
++        if (avio_feof(pb)) {
++            ret = AVERROR_INVALIDDATA;
++            goto fail;
++        }
++    }
++
+     grid->nb_tiles = entries;
+     grid->item = item;
++    ++c->nb_heif_grid;
+ 
+     av_log(c->fc, AV_LOG_TRACE, "dimg: from_item_id %d, entries %d\n",
+            from_item_id, entries);
+ 
+     return 0;
++fail:
++    av_freep(&grid->tile_id_list);
++    av_freep(&grid->tile_idx_list);
++    av_freep(&grid->tile_item_list);
++
++    return ret;
+ }
+ 
+ static int mov_read_iref_thmb(MOVContext *c, AVIOContext *pb, int version)
+ {
+     int entries;
+@@ -9732,10 +9750,11 @@
+         av_freep(&mov->heif_item[i]);
+     }
+     av_freep(&mov->heif_item);
+     for (i = 0; i < mov->nb_heif_grid; i++) {
+         av_freep(&mov->heif_grid[i].tile_id_list);
++        av_freep(&mov->heif_grid[i].tile_idx_list);
+         av_freep(&mov->heif_grid[i].tile_item_list);
+     }
+     av_freep(&mov->heif_grid);
+ 
+     return 0;
+@@ -9934,11 +9953,11 @@
+ 
+         while (x < tile_grid->coded_width) {
+             if (i == tile_grid->nb_tiles)
+                 return AVERROR_INVALIDDATA;
+ 
+-            tile_grid->offsets[i].idx        = i;
++            tile_grid->offsets[i].idx        = grid->tile_idx_list[i];
+             tile_grid->offsets[i].horizontal = x;
+             tile_grid->offsets[i].vertical   = y;
+ 
+             x += grid->tile_item_list[i++]->width;
+         }
+@@ -10008,11 +10027,11 @@
+         ret = AVERROR(ENOMEM);
+         goto fail;
+     }
+ 
+     for (int i = 0; i < tile_grid->nb_tiles; i++) {
+-        tile_grid->offsets[i].idx        = grid->tile_item_list[i]->st->index;
++        tile_grid->offsets[i].idx        = grid->tile_idx_list[i];
+         tile_grid->offsets[i].horizontal = (flags & 1) ? avio_rb32(s->pb) : avio_rb16(s->pb);
+         tile_grid->offsets[i].vertical   = (flags & 1) ? avio_rb32(s->pb) : avio_rb16(s->pb);
+         av_log(c->fc, AV_LOG_TRACE, "iovl: stream_idx[%d] %u, "
+                                     "horizontal_offset[%d] %d, vertical_offset[%d] %d\n",
+                i, tile_grid->offsets[i].idx,
+@@ -10060,14 +10079,24 @@
+                     loop = 0;
+                     break;
+                 }
+ 
+                 grid->tile_item_list[j] = item;
++                grid->tile_idx_list[j] = stg->nb_streams;
+ 
+                 err = avformat_stream_group_add_stream(stg, st);
+-                if (err < 0 && err != AVERROR(EEXIST))
+-                    return err;
++                if (err < 0) {
++                    int l;
++                    if (err != AVERROR(EEXIST))
++                        return err;
++
++                    for (l = 0; l < stg->nb_streams; l++)
++                        if (stg->streams[l]->index == st->index)
++                            break;
++                    av_assert0(l < stg->nb_streams);
++                    grid->tile_idx_list[j] = l;
++                }
+ 
+                 if (item->item_id != mov->primary_item_id)
+                     st->disposition |= AV_DISPOSITION_DEPENDENT;
+                 break;
+             }
+-- 
+2.43.0

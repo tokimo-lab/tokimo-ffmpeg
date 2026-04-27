@@ -1,0 +1,350 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tokimo <tokimo@localhost>
+Date: Thu, 1 Jan 2025 00:00:00 +0000
+Subject: [PATCH 2/2] fftools: add HEIC tile grid auto-assembly support
+
+Backport tile grid auto-assembly from upstream FFmpeg CLI.
+
+When a HEIC file contains a tile grid stream group, the CLI now
+automatically builds an xstack filter graph to assemble the tiles
+into a single output image.
+
+Changes:
+- ffmpeg.h: Add InputStreamGroup struct and stream_groups/nb_stream_groups
+  fields to InputFile, enabling the CLI to track stream groups
+- ffmpeg_demux.c: Add DemuxStreamGroup, demux_stream_group_alloc(),
+  istg_parse_tile_grid() (builds xstack filter from tile grid metadata),
+  istg_add() (dispatches by group type), and cleanup in ifile_close().
+  Iterate stream groups during demuxer init.
+- ffmpeg_mux_init.c: Add tile grid scoring in map_auto_video() so that
+  assembled tile grids compete with individual streams for auto-mapping
+
+Adapted to jellyfin-ffmpeg 7.1.3 API (simplified fg_create signature,
+no OutputFilterOptions crop/autorotate support).
+---
+--- a/fftools/ffmpeg.h	2026-03-30 14:37:44.976531868 +0800
++++ b/fftools/ffmpeg.h	2026-03-30 14:38:56.201673255 +0800
+@@ -469,10 +469,22 @@
+      */
+     struct OutputStream **outputs;
+     int                nb_outputs;
+ } InputStream;
+ 
++typedef struct InputStreamGroup {
++    const AVClass        *class;
++
++    /* parent source */
++    struct InputFile     *file;
++
++    int                   index;
++
++    FilterGraph          *fg;
++    AVStreamGroup        *stg;
++} InputStreamGroup;
++
+ typedef struct InputFile {
+     const AVClass   *class;
+ 
+     int              index;
+ 
+@@ -490,10 +502,14 @@
+     /* streams that ffmpeg is aware of;
+      * there may be extra streams in ctx that are not mapped to an InputStream
+      * if new streams appear dynamically during demuxing */
+     InputStream    **streams;
+     int           nb_streams;
++
++    /* stream groups that ffmpeg is aware of; */
++    InputStreamGroup **stream_groups;
++    int           nb_stream_groups;
+ } InputFile;
+ 
+ enum forced_keyframes_const {
+     FKF_N,
+     FKF_N_FORCED,
+--- a/fftools/ffmpeg_demux.c	2026-03-30 14:37:44.976531868 +0800
++++ b/fftools/ffmpeg_demux.c	2026-03-30 14:38:56.201673255 +0800
+@@ -23,10 +23,11 @@
+ #include "ffmpeg_sched.h"
+ #include "ffmpeg_utils.h"
+ 
+ #include "libavutil/avassert.h"
+ #include "libavutil/avstring.h"
++#include "libavutil/bprint.h"
+ #include "libavutil/display.h"
+ #include "libavutil/error.h"
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/opt.h"
+@@ -95,10 +96,17 @@
+     uint64_t                 nb_packets;
+     // combined size of all the packets read
+     uint64_t                 data_size;
+ } DemuxStream;
+ 
++typedef struct DemuxStreamGroup {
++    InputStreamGroup         istg;
++
++    // name used for logging
++    char                     log_name[32];
++} DemuxStreamGroup;
++
+ typedef struct Demuxer {
+     InputFile             f;
+ 
+     // name used for logging
+     char                  log_name[32];
+@@ -851,10 +859,20 @@
+     av_bsf_free(&ds->bsf);
+ 
+     av_freep(pist);
+ }
+ 
++static void istg_free(InputStreamGroup **pistg)
++{
++    InputStreamGroup *istg = *pistg;
++
++    if (!istg)
++        return;
++
++    av_freep(pistg);
++}
++
+ void ifile_close(InputFile **pf)
+ {
+     InputFile *f = *pf;
+     Demuxer   *d = demuxer_from_ifile(f);
+ 
+@@ -866,10 +884,14 @@
+ 
+     for (int i = 0; i < f->nb_streams; i++)
+         ist_free(&f->streams[i]);
+     av_freep(&f->streams);
+ 
++    for (int i = 0; i < f->nb_stream_groups; i++)
++        istg_free(&f->stream_groups[i]);
++    av_freep(&f->stream_groups);
++
+     avformat_close_input(&f->ctx);
+ 
+     av_packet_free(&d->pkt_heartbeat);
+ 
+     av_freep(pf);
+@@ -1625,10 +1647,94 @@
+     snprintf(d->log_name, sizeof(d->log_name), "in#%d", d->f.index);
+ 
+     return d;
+ }
+ 
++static DemuxStreamGroup *demux_stream_group_alloc(Demuxer *d, AVStreamGroup *stg)
++{
++    InputFile    *f = &d->f;
++    DemuxStreamGroup *dsg;
++
++    dsg = allocate_array_elem(&f->stream_groups, sizeof(*dsg), &f->nb_stream_groups);
++    if (!dsg)
++        return NULL;
++
++    dsg->istg.stg        = stg;
++    dsg->istg.file       = f;
++    dsg->istg.index      = stg->index;
++
++    snprintf(dsg->log_name, sizeof(dsg->log_name), "istg#%d:%d/%s",
++             d->f.index, stg->index, avformat_stream_group_name(stg->type));
++
++    return dsg;
++}
++
++static int istg_parse_tile_grid(Demuxer *d, InputStreamGroup *istg)
++{
++    InputFile *f = &d->f;
++    AVStreamGroup *stg = istg->stg;
++    const AVStreamGroupTileGrid *tg = stg->params.tile_grid;
++    AVBPrint bp;
++    char *graph_str;
++    int ret;
++
++    if (tg->nb_tiles == 1)
++        return 0;
++
++    av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
++    for (int i = 0; i < tg->nb_tiles; i++)
++        av_bprintf(&bp, "[%d:g:%d:%d]", f->index, stg->index, tg->offsets[i].idx);
++    av_bprintf(&bp, "xstack=inputs=%d:layout=", tg->nb_tiles);
++    for (int i = 0; i < tg->nb_tiles - 1; i++)
++        av_bprintf(&bp, "%d_%d|", tg->offsets[i].horizontal,
++                                  tg->offsets[i].vertical);
++    av_bprintf(&bp, "%d_%d:fill=0x%02X%02X%02X@0x%02X",
++               tg->offsets[tg->nb_tiles - 1].horizontal,
++               tg->offsets[tg->nb_tiles - 1].vertical,
++               tg->background[0], tg->background[1],
++               tg->background[2], tg->background[3]);
++    av_bprintf(&bp, "[%d:g:%d]", f->index, stg->index);
++    ret = av_bprint_finalize(&bp, &graph_str);
++    if (ret < 0)
++        return ret;
++
++    ret = fg_create(NULL, graph_str, d->sch);
++    if (ret < 0) {
++        av_freep(&graph_str);
++        return ret;
++    }
++
++    istg->fg = filtergraphs[nb_filtergraphs - 1];
++
++    return 0;
++}
++
++static int istg_add(Demuxer *d, AVStreamGroup *stg)
++{
++    DemuxStreamGroup *dsg;
++    InputStreamGroup *istg;
++    int ret;
++
++    dsg = demux_stream_group_alloc(d, stg);
++    if (!dsg)
++        return AVERROR(ENOMEM);
++
++    istg = &dsg->istg;
++
++    switch (stg->type) {
++    case AV_STREAM_GROUP_PARAMS_TILE_GRID:
++        ret = istg_parse_tile_grid(d, istg);
++        if (ret < 0)
++            return ret;
++        break;
++    default:
++        break;
++    }
++
++    return 0;
++}
++
+ int ifile_open(const OptionsContext *o, const char *filename, Scheduler *sch)
+ {
+     Demuxer   *d;
+     InputFile *f;
+     AVFormatContext *ic;
+@@ -1912,10 +2018,17 @@
+             av_dict_free(&opts_used);
+             return ret;
+         }
+     }
+ 
++    /* Add all the stream groups from the given input file to the demuxer */
++    for (int i = 0; i < ic->nb_stream_groups; i++) {
++        ret = istg_add(d, ic->stream_groups[i]);
++        if (ret < 0)
++            return ret;
++    }
++
+     /* dump the file content */
+     av_dump_format(ic, f->index, filename, 0);
+ 
+     /* check if all codec options have been used */
+     ret = check_avoptions_used(o->g->codec_opts, opts_used, d, 1);
+--- a/fftools/ffmpeg_mux_init.c	2026-03-30 14:37:44.976531868 +0800
++++ b/fftools/ffmpeg_mux_init.c	2026-03-30 14:38:56.201673255 +0800
+@@ -1554,10 +1554,11 @@
+ }
+ 
+ static int map_auto_video(Muxer *mux, const OptionsContext *o)
+ {
+     AVFormatContext *oc = mux->fc;
++    InputStreamGroup *best_istg = NULL;
+     InputStream *best_ist = NULL;
+     int64_t best_score = 0;
+     int qcr;
+ 
+     /* video: highest resolution */
+@@ -1565,12 +1566,45 @@
+         return 0;
+ 
+     qcr = avformat_query_codec(oc->oformat, oc->oformat->video_codec, 0);
+     for (int j = 0; j < nb_input_files; j++) {
+         InputFile *ifile = input_files[j];
++        InputStreamGroup *file_best_istg = NULL;
+         InputStream *file_best_ist = NULL;
+         int64_t file_best_score = 0;
++        for (int i = 0; i < ifile->nb_stream_groups; i++) {
++            InputStreamGroup *istg = ifile->stream_groups[i];
++            int64_t score = 0;
++
++            if (!istg->fg)
++                continue;
++
++            for (int k = 0; k < istg->stg->nb_streams; k++) {
++                AVStream *st = istg->stg->streams[k];
++
++                if (st->event_flags & AVSTREAM_EVENT_FLAG_NEW_PACKETS) {
++                    score = 100000000;
++                    break;
++                }
++            }
++
++            switch (istg->stg->type) {
++            case AV_STREAM_GROUP_PARAMS_TILE_GRID: {
++                const AVStreamGroupTileGrid *tg = istg->stg->params.tile_grid;
++                score += tg->width * (int64_t)tg->height
++                           + 5000000*!!(istg->stg->disposition & AV_DISPOSITION_DEFAULT);
++                break;
++            }
++            default:
++                continue;
++            }
++
++            if (score > file_best_score) {
++                file_best_score = score;
++                file_best_istg  = istg;
++            }
++        }
+         for (int i = 0; i < ifile->nb_streams; i++) {
+             InputStream *ist = ifile->streams[i];
+             int64_t score;
+ 
+             if (ist->user_set_discard == AVDISCARD_ALL ||
+@@ -1586,22 +1620,42 @@
+             if (score > file_best_score) {
+                 if((qcr==MKTAG('A', 'P', 'I', 'C')) && !(ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+                     continue;
+                 file_best_score = score;
+                 file_best_ist   = ist;
++                file_best_istg  = NULL;
++            }
++        }
++        if (file_best_istg) {
++            file_best_score -= 5000000*!!(file_best_istg->stg->disposition & AV_DISPOSITION_DEFAULT);
++            if (file_best_score > best_score) {
++                best_score = file_best_score;
++                best_istg = file_best_istg;
++                best_ist = NULL;
+             }
+         }
+         if (file_best_ist) {
+             if((qcr == MKTAG('A', 'P', 'I', 'C')) ||
+                !(file_best_ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+                 file_best_score -= 5000000*!!(file_best_ist->st->disposition & AV_DISPOSITION_DEFAULT);
+             if (file_best_score > best_score) {
+                 best_score = file_best_score;
+                 best_ist = file_best_ist;
++                best_istg = NULL;
+             }
+        }
+     }
++    if (best_istg) {
++        FilterGraph *fg = best_istg->fg;
++        OutputFilter *ofilter = fg->outputs[0];
++
++        av_assert0(fg->nb_outputs == 1);
++        av_log(mux, AV_LOG_VERBOSE, "Creating output stream from stream group "
++               "derived complex filtergraph %d.\n", fg->index);
++
++        return ost_add(mux, o, AVMEDIA_TYPE_VIDEO, NULL, ofilter, NULL, NULL);
++    }
+     if (best_ist)
+         return ost_add(mux, o, AVMEDIA_TYPE_VIDEO, best_ist, NULL, NULL, NULL);
+ 
+     return 0;
+ }
+-- 
+2.43.0

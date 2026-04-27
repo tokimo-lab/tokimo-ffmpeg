@@ -11,6 +11,7 @@ SRC_DIR="$ROOT_DIR/ffmpeg-src"
 BUILD_DIR="$ROOT_DIR/build"
 INSTALL_DIR="$ROOT_DIR/install"
 PATCHES_DIR="$ROOT_DIR/patches"
+LOCAL_PATCHES_DIR="$ROOT_DIR/patches/local"
 FFMPEG_GIT_URL="https://github.com/jellyfin/jellyfin-ffmpeg.git"
 FFMPEG_REF="jellyfin"
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -28,6 +29,7 @@ while (($# > 0)); do
     --build)     BUILD_DIR="$2";   shift 2 ;;
     --install)   INSTALL_DIR="$2"; shift 2 ;;
     --patches)   PATCHES_DIR="$2"; shift 2 ;;
+    --local-patches) LOCAL_PATCHES_DIR="$2"; shift 2 ;;
     --ref)       FFMPEG_REF="$2";  shift 2 ;;
     --jobs)      JOBS="$2";        shift 2 ;;
     --no-nvidia) ENABLE_NVIDIA=0;  shift   ;;
@@ -104,6 +106,34 @@ if [[ -f "$SERIES_FILE" ]]; then
   done < "$SERIES_FILE"
 fi
 log "Patches: $applied applied, $skipped already applied, $failed failed"
+
+# ─── Step 3b: Apply Tokimo patches ──────────────────────────────
+log "Step 3b/5: Applying tokimo patches from $LOCAL_PATCHES_DIR"
+if [[ -d "$LOCAL_PATCHES_DIR" ]]; then
+  shopt -s nullglob
+  tokimo_patches=("$LOCAL_PATCHES_DIR"/*.patch)
+  shopt -u nullglob
+  if [[ ${#tokimo_patches[@]} -eq 0 ]]; then
+    warn "No tokimo patches found in $LOCAL_PATCHES_DIR — refusing to continue (set --local-patches '' to skip explicitly)"
+    if [[ "$LOCAL_PATCHES_DIR" != "" ]]; then
+      die "Missing tokimo patches; aborting"
+    fi
+  fi
+  for patch_file in "${tokimo_patches[@]}"; do
+    patch_name="$(basename "$patch_file")"
+    if (cd "$SRC_DIR" && patch --dry-run --reverse -p1 -s < "$patch_file" >/dev/null 2>&1); then
+      log "  Already applied: $patch_name"
+      continue
+    fi
+    if (cd "$SRC_DIR" && patch --forward -p1 -s < "$patch_file" >/dev/null 2>&1); then
+      log "  Applied tokimo: $patch_name"
+    else
+      die "Tokimo patch FAILED: $patch_name"
+    fi
+  done
+else
+  warn "Tokimo patches dir not found: $LOCAL_PATCHES_DIR"
+fi
 
 # ─── Step 4: Setup Third-Party Headers ──────────────────────────
 log "Step 4/5: Setting up third-party headers"
