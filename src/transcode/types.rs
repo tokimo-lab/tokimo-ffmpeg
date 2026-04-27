@@ -93,7 +93,7 @@ pub struct DirectInput {
     /// Read up to `size` bytes from `offset`. Returns the owned Vec<u8>
     /// (possibly shorter than `size`), or an empty Vec for EOF.
     /// Returning the Vec directly avoids a copy vs. the old fill-buffer signature.
-    pub read_at: tokimo_vfs_core::ReadAt,
+    pub read_at: crate::ReadAt,
     /// Total file size in bytes.
     pub size: u64,
     /// Optional filename hint for format detection (e.g. "movie.mkv").
@@ -118,7 +118,7 @@ impl DirectInput {
         use std::fs::File;
         use std::os::unix::fs::FileExt;
         let file = Arc::new(File::open(path.as_ref())?);
-        let read_at: tokimo_vfs_core::ReadAt = Arc::new(move |offset, max| {
+        let read_at: crate::ReadAt = Arc::new(move |offset, max| {
             let mut buf = vec![0u8; max];
             let n = file.read_at(&mut buf, offset)?;
             buf.truncate(n);
@@ -134,7 +134,7 @@ impl DirectInput {
 
     /// Construct from any [`ReadAt`] closure (local or VFS).
     pub fn from_read_at(
-        read_at: tokimo_vfs_core::ReadAt,
+        read_at: crate::ReadAt,
         size: u64,
         filename_hint: Option<String>,
         readahead_bytes: Option<u64>,

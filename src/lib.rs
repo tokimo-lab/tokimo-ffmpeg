@@ -40,8 +40,14 @@ pub use common::encoding::{
 };
 
 // ── Transcode engine re-exports ──────────────────────────────────────
-pub use tokimo_vfs_core::ReadAt;
 pub use rsmpeg::avutil::AVHWDeviceContext;
+/// Synchronous random-access reader: `(offset, max_bytes) -> bytes`.
+///
+/// Structurally identical to `tokimo_vfs_core::ReadAt` — both crates define
+/// `Arc<dyn Fn(u64, usize) -> io::Result<Vec<u8>> + Send + Sync>` which is the
+/// same Rust type, so values produced by `tokimo_vfs_core::sync::make_sync_reader`
+/// can be passed directly into this crate's APIs.
+pub type ReadAt = std::sync::Arc<dyn Fn(u64, usize) -> std::io::Result<Vec<u8>> + Send + Sync>;
 pub use transcode::hw::{
     FallbackLevel, FilterBackend, HwAccel, HwPipeline, HwType, build_pipeline, infer_hw_from_codec, parse_hw_type,
     resolve_pipeline, resolve_pipeline_with_fallback,

@@ -8,23 +8,6 @@ edition = "2024"
 name = "tokimo-ffmpeg"
 path = "src/main.rs"
 
-[[bin]]
-name = "screenshot-smb-bench"
-path = "src/bin/screenshot_smb_bench.rs"
-required-features = ["bench"]
-
-[features]
-bench = [
-    "dep:tokimo-vfs",
-    "dep:tokimo-vfs-op",
-    "dep:tokio",
-    "dep:tracing-subscriber",
-    "dep:tikv-jemallocator",
-    "dep:tikv-jemalloc-ctl",
-    "dep:tikv-jemalloc-sys",
-    "dep:libc",
-]
-
 [dependencies]
 rsmpeg = { version = "0.18.0", default-features = false, features = ["ffmpeg7_1", "link_system_ffmpeg"] }
 clap = { version = "4", features = ["derive"] }
@@ -33,14 +16,3 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tokimo-vfs-core = { path = "../tokimo-package-vfs/packages/core" }
-
-# ── screenshot-smb-bench only (feature = "bench") ─────────────────────────
-tokimo-vfs     = { path = "../tokimo-package-vfs/packages/fs",    optional = true }
-tokimo-vfs-op  = { path = "../tokimo-package-vfs/packages/op",    optional = true }
-tokio       = { version = "1", features = ["full"],       optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-tikv-jemallocator  = { version = "0.6",                   optional = true }
-tikv-jemalloc-ctl  = { version = "0.6", features = ["stats"], optional = true }
-tikv-jemalloc-sys  = { version = "0.6",                   optional = true }
-libc                = { version = "0.2",                   optional = true }
