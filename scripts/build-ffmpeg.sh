@@ -211,6 +211,23 @@ esac
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$INSTALL_DIR"
 
+# On macOS, Homebrew installs to /opt/homebrew (Apple Silicon) or /usr/local
+# (Intel). Several FFmpeg dependency probes — most notably libsoxr, which uses
+# `require libsoxr soxr.h soxr_create -lsoxr` (raw header + lib check, not
+# pkg-config) — fail if the compiler / linker do not search Homebrew's prefix.
+# pkg-config-based probes work via PKG_CONFIG_PATH, but require/check_lib
+# probes do not, so we have to inject the include / lib paths explicitly.
+EXTRA_CFLAGS=""
+EXTRA_LDFLAGS=""
+if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+  BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+  if [[ -n "$BREW_PREFIX" && -d "$BREW_PREFIX/include" ]]; then
+    EXTRA_CFLAGS="-I$BREW_PREFIX/include"
+    EXTRA_LDFLAGS="-L$BREW_PREFIX/lib"
+    log "  macOS: injecting Homebrew prefix into extra-cflags/ldflags ($BREW_PREFIX)"
+  fi
+fi
+
 configure_flags=(
   "--prefix=$INSTALL_DIR"
   "--enable-gpl"
@@ -307,6 +324,13 @@ elif pkg_exists libmfx; then
 fi
 
 cd "$BUILD_DIR"
+
+if [[ -n "$EXTRA_CFLAGS" ]]; then
+  configure_flags+=("--extra-cflags=$EXTRA_CFLAGS")
+fi
+if [[ -n "$EXTRA_LDFLAGS" ]]; then
+  configure_flags+=("--extra-ldflags=$EXTRA_LDFLAGS")
+fi
 
 log "Running configure with ${#configure_flags[@]} flags..."
 if ! "$SRC_DIR/configure" "${configure_flags[@]}" > /tmp/configure.log 2>&1; then
