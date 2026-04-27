@@ -60,9 +60,9 @@ jobs:
       - name: Build patched FFmpeg
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
         run: |
-          # Disable NVIDIA / AMF on CI (no GPU drivers / SDKs preinstalled,
+          # Disable NVIDIA / AMF / Vulkan on CI (no GPU drivers / SDKs preinstalled,
           # and configure does not need them for our ffmpeg7_1 link surface).
-          ./scripts/build-ffmpeg.sh --no-nvidia --no-amf
+          ./scripts/build-ffmpeg.sh --no-nvidia --no-amf --no-vulkan
 
       - name: Verify FFmpeg artifacts
         run: |
@@ -149,9 +149,9 @@ jobs:
           PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig
         run: |
           # macOS lacks libdrm/libva/libpulse/etc — build-ffmpeg.sh skips them via pkg-config.
-          # We turn off NVIDIA + AMF (Linux-specific in our flow) and let configure
-          # auto-detect remaining codecs via Homebrew pkg-config.
-          ./scripts/build-ffmpeg.sh --no-nvidia --no-amf
+          # We turn off NVIDIA + AMF (Linux-specific in our flow) and Vulkan (no headers/loader
+          # on the runner) and let configure auto-detect remaining codecs via Homebrew pkg-config.
+          ./scripts/build-ffmpeg.sh --no-nvidia --no-amf --no-vulkan
 
       - name: Verify FFmpeg artifacts
         run: |

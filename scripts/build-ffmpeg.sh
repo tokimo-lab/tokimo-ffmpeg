@@ -17,6 +17,7 @@ FFMPEG_REF="jellyfin"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 ENABLE_NVIDIA=1
 ENABLE_AMF=1
+ENABLE_VULKAN=1
 PATCHES_ONLY=0
 
 log() { printf '[build] %s\n' "$*"; }
@@ -35,6 +36,7 @@ while (($# > 0)); do
     --jobs)      JOBS="$2";        shift 2 ;;
     --no-nvidia) ENABLE_NVIDIA=0;  shift   ;;
     --no-amf)    ENABLE_AMF=0;     shift   ;;
+    --no-vulkan) ENABLE_VULKAN=0;  shift   ;;
     --patches-only) PATCHES_ONLY=1; shift  ;;
     *) die "Unknown option: $1" ;;
   esac
@@ -46,17 +48,22 @@ pkg_exists() {
 }
 
 append_if_pkg() {
-  local -n arr="$1"
-  local flag="$2" pkg="$3"
-  if pkg_exists "$pkg"; then arr+=("$flag"); fi
+  # $1: array name, $2: flag, $3: pkg
+  # Uses eval-based indirect array append for bash 3.2 compatibility (macOS).
+  if pkg_exists "$3"; then
+    eval "$1+=(\"\$2\")"
+  fi
 }
 
 append_if_any_pkg() {
-  local -n arr="$1"
-  local flag="$2"
+  # $1: array name, $2: flag, $3+: pkg names
+  local _arr="$1" _flag="$2"
   shift 2
   for pkg in "$@"; do
-    if pkg_exists "$pkg"; then arr+=("$flag"); return; fi
+    if pkg_exists "$pkg"; then
+      eval "$_arr+=(\"\$_flag\")"
+      return
+    fi
   done
 }
 
@@ -162,15 +169,19 @@ if [[ "$ENABLE_NVIDIA" == "1" ]]; then
 fi
 
 # Vulkan headers (need >= 1.3.277 for FFmpeg, Ubuntu 24.04 ships 1.3.275)
-VK_DIR="$THIRD_PARTY/Vulkan-Headers"
-if [[ -d "$VK_DIR/.git" ]]; then
-  git -C "$VK_DIR" pull --rebase 2>/dev/null || true
+if [[ "$ENABLE_VULKAN" == "1" ]]; then
+  VK_DIR="$THIRD_PARTY/Vulkan-Headers"
+  if [[ -d "$VK_DIR/.git" ]]; then
+    git -C "$VK_DIR" pull --rebase 2>/dev/null || true
+  else
+    git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$VK_DIR"
+  fi
+  cmake -S "$VK_DIR" -B "$VK_DIR/build" -DCMAKE_INSTALL_PREFIX="$TP_PREFIX" -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
+  cmake --install "$VK_DIR/build" >/dev/null 2>&1
+  log "  Vulkan-Headers installed ($(grep VK_HEADER_VERSION "$TP_PREFIX/include/vulkan/vulkan_core.h" | head -1 | awk '{print $3}'))"
 else
-  git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$VK_DIR"
+  log "  Vulkan disabled (--no-vulkan); skipping Vulkan-Headers install"
 fi
-cmake -S "$VK_DIR" -B "$VK_DIR/build" -DCMAKE_INSTALL_PREFIX="$TP_PREFIX" -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
-cmake --install "$VK_DIR/build" >/dev/null 2>&1
-log "  Vulkan-Headers installed ($(grep VK_HEADER_VERSION "$TP_PREFIX/include/vulkan/vulkan_core.h" | head -1 | awk '{print $3}'))"
 
 # AMF headers
 if [[ "$ENABLE_AMF" == "1" ]]; then
@@ -259,9 +270,11 @@ append_if_pkg configure_flags "--enable-libjack" jack
 append_if_pkg configure_flags "--enable-libpulse" libpulse
 
 # GPU: Vulkan + libplacebo
-append_if_pkg configure_flags "--enable-vulkan" vulkan
-append_if_pkg configure_flags "--enable-libplacebo" libplacebo
-append_if_any_pkg configure_flags "--enable-libshaderc" shaderc shaderc_combined
+if [[ "$ENABLE_VULKAN" == "1" ]]; then
+  append_if_pkg configure_flags "--enable-vulkan" vulkan
+  append_if_pkg configure_flags "--enable-libplacebo" libplacebo
+  append_if_any_pkg configure_flags "--enable-libshaderc" shaderc shaderc_combined
+fi
 
 # GPU: OpenCL
 append_if_pkg configure_flags "--enable-opencl" OpenCL
