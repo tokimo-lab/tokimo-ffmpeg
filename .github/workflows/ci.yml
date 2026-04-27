@@ -136,7 +136,7 @@ jobs:
           # Core toolchain
           brew update
           brew install \
-            pkg-config nasm yasm meson ninja cmake \
+            pkg-config nasm yasm meson ninja cmake gpatch \
             x264 x265 dav1d svt-av1 libvpx aom \
             opus libvorbis lame fdk-aac theora libsoxr \
             libass freetype fribidi harfbuzz fontconfig \

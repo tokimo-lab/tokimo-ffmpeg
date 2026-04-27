@@ -24,6 +24,16 @@ log() { printf '[build] %s\n' "$*"; }
 warn() { printf '[build] WARN: %s\n' "$*" >&2; }
 die() { printf '[build] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Prefer GNU patch (gpatch) when available — macOS ships BSD `patch`,
+# which is stricter about fuzz / hunk reordering and rejects ~6 of the
+# jellyfin debian patches that GNU patch handles fine. Linux/Windows
+# already have GNU patch as `patch`, so this is a no-op there.
+if command -v gpatch >/dev/null 2>&1; then
+  PATCH_CMD="gpatch"
+else
+  PATCH_CMD="patch"
+fi
+
 # ─── Parse args ──────────────────────────────────────────────────
 while (($# > 0)); do
   case "$1" in
@@ -101,12 +111,12 @@ if [[ -f "$SERIES_FILE" ]]; then
     [[ -f "$patch_file" ]] || continue
 
     # Already applied?
-    if (cd "$SRC_DIR" && patch --dry-run --reverse -p1 -s < "$patch_file" >/dev/null 2>&1); then
+    if (cd "$SRC_DIR" && "$PATCH_CMD" --dry-run --reverse -p1 -s < "$patch_file" >/dev/null 2>&1); then
       ((skipped++)) || true
       continue
     fi
 
-    if (cd "$SRC_DIR" && patch --forward -p1 -s < "$patch_file" >/dev/null 2>&1); then
+    if (cd "$SRC_DIR" && "$PATCH_CMD" --forward -p1 -s < "$patch_file" >/dev/null 2>&1); then
       ((applied++)) || true
     else
       warn "Patch conflict: $patch_name"
@@ -130,11 +140,11 @@ if [[ -d "$LOCAL_PATCHES_DIR" ]]; then
   fi
   for patch_file in "${tokimo_patches[@]}"; do
     patch_name="$(basename "$patch_file")"
-    if (cd "$SRC_DIR" && patch --dry-run --reverse -p1 -s < "$patch_file" >/dev/null 2>&1); then
+    if (cd "$SRC_DIR" && "$PATCH_CMD" --dry-run --reverse -p1 -s < "$patch_file" >/dev/null 2>&1); then
       log "  Already applied: $patch_name"
       continue
     fi
-    if (cd "$SRC_DIR" && patch --forward -p1 -s < "$patch_file" >/dev/null 2>&1); then
+    if (cd "$SRC_DIR" && "$PATCH_CMD" --forward -p1 -s < "$patch_file" >/dev/null 2>&1); then
       log "  Applied tokimo: $patch_name"
     else
       die "Tokimo patch FAILED: $patch_name"
