@@ -17,6 +17,7 @@ FFMPEG_REF="jellyfin"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 ENABLE_NVIDIA=1
 ENABLE_AMF=1
+PATCHES_ONLY=0
 
 log() { printf '[build] %s\n' "$*"; }
 warn() { printf '[build] WARN: %s\n' "$*" >&2; }
@@ -34,6 +35,7 @@ while (($# > 0)); do
     --jobs)      JOBS="$2";        shift 2 ;;
     --no-nvidia) ENABLE_NVIDIA=0;  shift   ;;
     --no-amf)    ENABLE_AMF=0;     shift   ;;
+    --patches-only) PATCHES_ONLY=1; shift  ;;
     *) die "Unknown option: $1" ;;
   esac
 done
@@ -133,6 +135,11 @@ if [[ -d "$LOCAL_PATCHES_DIR" ]]; then
   done
 else
   warn "Tokimo patches dir not found: $LOCAL_PATCHES_DIR"
+fi
+
+if [[ "$PATCHES_ONLY" == "1" ]]; then
+  log "Stop after patches (--patches-only); skipping third-party + configure + build."
+  exit 0
 fi
 
 # ─── Step 4: Setup Third-Party Headers ──────────────────────────

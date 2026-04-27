@@ -193,40 +193,244 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
-  # ─── Windows: TODO — see docs/ci-windows-todo.md ───────────────
+  # ─── Windows: msys2/clang64 build + clippy + test ──────────────
   #
-  # Why disabled:
-  #   - jellyfin-ffmpeg's Windows build is a 30+ msys2 PKGBUILD chain
-  #     (clang64 toolchain, custom builds of x264/x265/dav1d/svt-av1/etc.
-  #     all with their own jellyfin patches) — see
-  #     .vendors/ffmpeg/src/msys2/ in the parent tokimo repo and
-  #     .inspo/jellyfin-ffmpeg/.github/workflows/_meta_win_clang_portable.yaml
-  #     for the reference pipeline. Reproducing it cleanly under
-  #     msys2/setup-msys2 GH action is multi-day work and almost
-  #     certainly needs several rounds of iteration on real CI.
-  #   - The simpler "use mingw prebuilt deps + only rebuild ffmpeg" path
-  #     is feasible but still requires a working clang64 cross-compile
-  #     of FFmpeg with all 32 patches applied. Punted to a follow-up PR
-  #     so we don't block Linux/macOS coverage.
-  #
-  # Acceptance for the eventual Windows job:
-  #   1. Use msys2/setup-msys2@v2 with msystem: CLANG64
-  #   2. pacman -S mingw-w64-clang-x86_64-{x264,x265,dav1d,...}
-  #   3. Adapt scripts/build-ffmpeg.sh to a Windows path that
-  #      runs configure under the msys2 shell with the same patches.
-  #   4. cargo with rsmpeg link_system_ffmpeg pointing at install/.
-  #
-  # windows:
-  #   name: windows (build + clippy + test)
-  #   runs-on: windows-latest
-  #   needs: fmt
-  #   defaults:
-  #     run:
-  #       shell: msys2 {0}
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: msys2/setup-msys2@v2
-  #       with:
-  #         msystem: CLANG64
-  #         update: true
-  #     # ... TODO ...
+  # Strategy (Path A — pragmatic):
+  #   - Use msys2/setup-msys2 with msystem=CLANG64 (matches upstream
+  #     jellyfin-ffmpeg's Windows build environment).
+  #   - Install prebuilt mingw-w64-clang-x86_64-* dependency packages
+  #     via pacman instead of rebuilding the full 30+ PKGBUILD chain
+  #     from .vendors/ffmpeg/src/msys2/PKGBUILD/. This trades the
+  #     jellyfin-specific patches on those deps (lame/dav1d/svt-av1/…)
+  #     for ~hours of CI time. If a missing patch later breaks runtime
+  #     behaviour, we'll cherry-pick the affected PKGBUILD then.
+  #   - Reuse scripts/build-ffmpeg.sh in --patches-only mode so the
+  #     same patch-application logic (94 jellyfin debian patches +
+  #     2 tokimo local patches) is shared with Linux/macOS, then run
+  #     configure + make manually here with a Windows-appropriate
+  #     flag set (no NVIDIA / AMF / VAAPI / libdrm / pulse).
+  #   - Use msys2's mingw-w64-clang-x86_64-rust so the resulting
+  #     cargo target is x86_64-pc-windows-gnu, matching the FFmpeg
+  #     ABI we just built. Mixing MSVC-toolchain rust with mingw
+  #     FFmpeg would link-fail.
+  windows:
+    name: windows (build + clippy + test)
+    runs-on: windows-latest
+    needs: fmt
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          # Keep this list aligned with what scripts/build-ffmpeg.sh's
+          # append_if_pkg checks for. Anything missing just disables a
+          # codec at configure time — no hard failure — so it's safe to
+          # be generous here. Names verified against current msys2
+          # CLANG64 repo (December 2025); flag any future renames with
+          # `pacman -Ss <name>` inside an msys2 shell.
+          install: >-
+            base-devel
+            git
+            patch
+            diffutils
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-make
+            mingw-w64-clang-x86_64-nasm
+            mingw-w64-clang-x86_64-yasm
+            mingw-w64-clang-x86_64-meson
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-rust
+            mingw-w64-clang-x86_64-x264
+            mingw-w64-clang-x86_64-x265
+            mingw-w64-clang-x86_64-dav1d
+            mingw-w64-clang-x86_64-svt-av1
+            mingw-w64-clang-x86_64-aom
+            mingw-w64-clang-x86_64-libvpx
+            mingw-w64-clang-x86_64-opus
+            mingw-w64-clang-x86_64-lame
+            mingw-w64-clang-x86_64-libvorbis
+            mingw-w64-clang-x86_64-libtheora
+            mingw-w64-clang-x86_64-libopenmpt
+            mingw-w64-clang-x86_64-libwebp
+            mingw-w64-clang-x86_64-libass
+            mingw-w64-clang-x86_64-libbluray
+            mingw-w64-clang-x86_64-fdk-aac
+            mingw-w64-clang-x86_64-fontconfig
+            mingw-w64-clang-x86_64-freetype
+            mingw-w64-clang-x86_64-fribidi
+            mingw-w64-clang-x86_64-harfbuzz
+            mingw-w64-clang-x86_64-zimg
+            mingw-w64-clang-x86_64-libsoxr
+            mingw-w64-clang-x86_64-srt
+            mingw-w64-clang-x86_64-openjpeg2
+            mingw-w64-clang-x86_64-libjxl
+            mingw-w64-clang-x86_64-chromaprint
+
+      - name: Resolve jellyfin-ffmpeg HEAD (for cache key)
+        id: ffmpeg_head
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote https://github.com/jellyfin/jellyfin-ffmpeg.git "refs/heads/${FFMPEG_REF}" | awk '{print $1}')
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote https://github.com/jellyfin/jellyfin-ffmpeg.git "refs/tags/${FFMPEG_REF}" | awk '{print $1}')
+          fi
+          [ -n "$sha" ] || { echo "Could not resolve FFMPEG_REF=$FFMPEG_REF"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved jellyfin-ffmpeg ${FFMPEG_REF} -> $sha"
+
+      - name: Cache FFmpeg build
+        id: ffmpeg_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffmpeg-src
+            install
+          key: windows-clang64-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/extract-patches.sh', 'patches/local/**', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            windows-clang64-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-
+            windows-clang64-ffmpeg-
+
+      - name: Apply jellyfin + tokimo patches
+        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # build-ffmpeg.sh handles: clone jellyfin-ffmpeg, checkout ref,
+          # extract debian patches, apply 94 jellyfin debian patches,
+          # apply 2 tokimo patches in patches/local/. --patches-only
+          # exits before the Linux-specific third-party / configure /
+          # make steps, leaving ffmpeg-src/ ready for Windows configure.
+          ./scripts/build-ffmpeg.sh --patches-only
+
+      - name: Configure & build FFmpeg (clang64)
+        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          ROOT="$(pwd)"
+          SRC="$ROOT/ffmpeg-src"
+          BUILD="$ROOT/build"
+          INSTALL="$ROOT/install"
+
+          rm -rf "$BUILD"
+          mkdir -p "$BUILD" "$INSTALL"
+          cd "$BUILD"
+
+          # GPU vendor flags (NVIDIA/AMF/VAAPI/libdrm) intentionally
+          # omitted on the first Windows job iteration — they require
+          # nv-codec-headers / AMF SDK / libva, none of which the
+          # mingw repos ship out-of-the-box. Upstream jellyfin-ffmpeg's
+          # Windows build does enable AMF + ffnvcodec + libvpl, so this
+          # is a known capability gap. Tracked TODOs below.
+          # TODO(windows-gpu): add nv-codec-headers + AMF SDK + libvpl
+          #                    once the minimal build is green.
+
+          configure_flags=(
+            "--prefix=$INSTALL"
+            "--enable-gpl"
+            "--enable-version3"
+            "--enable-nonfree"
+            "--enable-shared"
+            "--disable-static"
+            "--enable-pic"
+            "--disable-doc"
+            "--disable-debug"
+            "--disable-ffplay"
+            "--enable-lto=auto"
+            "--extra-version=Jellyfin"
+            "--arch=x86_64"
+            "--target-os=mingw64"
+            "--cc=clang"
+            "--cxx=clang++"
+            "--ld=clang"
+            # video
+            "--enable-libx264"
+            "--enable-libx265"
+            "--enable-libdav1d"
+            "--enable-libsvtav1"
+            "--enable-libvpx"
+            "--enable-libaom"
+            # audio
+            "--enable-libopus"
+            "--enable-libvorbis"
+            "--enable-libmp3lame"
+            "--enable-libfdk-aac"
+            "--enable-libtheora"
+            "--enable-libopenmpt"
+            "--enable-libsoxr"
+            # subtitle / text
+            "--enable-libass"
+            "--enable-libfontconfig"
+            "--enable-libfreetype"
+            "--enable-libfribidi"
+            "--enable-libharfbuzz"
+            # container / image / misc
+            "--enable-libbluray"
+            "--enable-libwebp"
+            "--enable-libzimg"
+            "--enable-chromaprint"
+            "--enable-libsrt"
+            "--enable-libopenjpeg"
+            "--enable-libjxl"
+          )
+
+          export PKG_CONFIG_PATH="/clang64/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          echo "Running configure with ${#configure_flags[@]} flags..."
+          if ! "$SRC/configure" "${configure_flags[@]}" > configure.log 2>&1; then
+            echo "Configure FAILED. Last 80 lines of configure.log:"
+            tail -80 configure.log
+            echo "---- ffbuild/config.log tail (if present) ----"
+            tail -120 ffbuild/config.log 2>/dev/null || true
+            exit 1
+          fi
+          tail -10 configure.log
+
+          # mingw-w64-clang-x86_64-make installs as `mingw32-make`; plain `make`
+          # comes from base-devel and works fine for FFmpeg's Makefile.
+          make -j"$(nproc)"
+          make install
+
+          ls -la "$INSTALL/lib/pkgconfig/" || true
+          ls -la "$INSTALL/bin/" | head -20 || true
+
+      - name: Verify FFmpeg artifacts
+        run: |
+          set -euo pipefail
+          ls -la install/lib/pkgconfig/ || true
+          # ffmpeg.exe needs the codec DLLs in /clang64/bin on PATH at runtime.
+          export PATH="$(pwd)/install/bin:/clang64/bin:$PATH"
+          ./install/bin/ffmpeg.exe -hide_banner -version | head -3 || true
+
+      - name: cargo fmt / clippy / build / test
+        env:
+          # rsmpeg's build script reads these to locate FFmpeg headers + libs.
+          # Mixed unix/windows paths confuse pkg-config on mingw, so we set
+          # PKG_CONFIG_PATH after cd-ing and using $(pwd) (msys2 unix-style).
+          FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
+          FFMPEG_INCLUDE_DIR: ${{ github.workspace }}\install\include
+          FFMPEG_DYN_DIR: ${{ github.workspace }}\install\lib
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$(pwd)/install/lib/pkgconfig:/clang64/lib/pkgconfig"
+          # Tests / built binaries need to load FFmpeg DLLs and the codec
+          # DLLs from the mingw runtime at execution time.
+          export PATH="$(pwd)/install/bin:/clang64/bin:$PATH"
+
+          # Use the rust toolchain shipped by msys2 (mingw GNU ABI) — it
+          # matches the FFmpeg we just linked. dtolnay/rust-toolchain
+          # would install MSVC-ABI rust, which would fail at link time.
+          rustc --version
+          cargo --version
+
+          cargo fmt --all -- --check
+          cargo clippy --lib --bins --tests -- -D warnings
+          cargo build --lib --bins --tests
+          cargo test --lib --bins
