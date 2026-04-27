@@ -460,7 +460,9 @@ pub fn resolve_pipeline_with_fallback(video_codec: &str) -> HwPipeline {
 fn infer_fallback_level(decode: Option<HwType>, filter: FilterBackend, encode: Option<HwType>) -> FallbackLevel {
     match (decode, filter, encode) {
         (Some(d), FilterBackend::Native, Some(e)) if d == e => FallbackLevel::FullHw,
-        (Some(_), FilterBackend::OpenCL | FilterBackend::Vulkan | FilterBackend::Native, Some(_)) => FallbackLevel::CrossDevice,
+        (Some(_), FilterBackend::OpenCL | FilterBackend::Vulkan | FilterBackend::Native, Some(_)) => {
+            FallbackLevel::CrossDevice
+        }
         (None, _, Some(_)) => FallbackLevel::MixedSwDecode,
         (Some(_), FilterBackend::Software, Some(_)) => FallbackLevel::MixedHwDownload,
         _ => FallbackLevel::Software,
