@@ -428,6 +428,31 @@ jobs:
           # Kept so any other downstream crate (rsmpeg, etc.) that does
           # consult pkg-config still finds our build.
           FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
+          # Force rusty_ffmpeg's runtime bindgen (build.rs lines 542-560,
+          # target_os="windows" branch with FFMPEG_LIBS_DIR + FFMPEG_INCLUDE_DIR
+          # set, calls generate_bindings()) to invoke clang as if it were
+          # targeting Linux. Without this, mingw clang predefines _WIN32 /
+          # __MINGW32__ which causes bindgen to emit accessor methods (and
+          # drop some fields entirely) for AVFormatContext members whose
+          # type is a pointer to a forward-declared composite — `pb`,
+          # `iformat`, `oformat`, `streams`, `nb_streams`, `metadata`.
+          # rsmpeg 0.18 source code accesses these as plain Rust fields via
+          # Deref, so the mismatch breaks compilation with 22 errors of the
+          # shape `no field 'pb' on type 'AVFormatContext'` /
+          # `attempted to take value of method 'metadata' on type
+          # '&AVFormatContextInput'` (CI run 25024190034).
+          #
+          # `--target=x86_64-unknown-linux-gnu` makes clang preprocess the
+          # FFmpeg headers identically to the Linux job (which is green),
+          # so the generated binding has the same field-vs-method shape
+          # that rsmpeg's source expects. `-isystem /clang64/include` keeps
+          # mingw's stdint.h / limits.h reachable so primitive width
+          # decisions still match the actual mingw FFmpeg DLLs at link
+          # time. ABI risk is bounded: `unsigned long` (4 vs 8 bytes)
+          # appears in `AVIOContext.checksum` but not in any public field
+          # of `AVFormatContext` / `AVFrame` / `AVCodecContext` that
+          # rsmpeg dereferences.
+          BINDGEN_EXTRA_CLANG_ARGS: "--target=x86_64-unknown-linux-gnu -isystem /clang64/include"
         run: |
           set -euo pipefail
           export PKG_CONFIG_PATH="$(pwd)/install/lib/pkgconfig:/clang64/lib/pkgconfig"
