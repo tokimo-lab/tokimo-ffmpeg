@@ -70,11 +70,16 @@ docker run --rm "${UIDARGS[@]}" \
 
     nproc_count=$(nproc)
 
-    # ── 1. Build fdk-aac into the image-shared FFBUILD_PREFIX ──────────
+    # ── 1. Build fdk-aac into a user-writable prefix ───────────────────
     # mstorsjo/fdk-aac is plain autotools, ~30s wall clock under -j$(nproc).
     # We pin to the same commit BtbN uses in scripts.d/50-fdk-aac.sh so
     # the binding stays reproducible across runs.
-    if [[ ! -f "$FFBUILD_PREFIX/lib/libfdk-aac.a" ]]; then
+    #
+    # Install prefix is /work/build/fdk-aac-prefix (host-mounted) — we
+    # cannot write to $FFBUILD_PREFIX (=/opt/ffbuild, root-owned) when
+    # the container runs as the host UID via -u $(id -u):$(id -g).
+    FDK_PREFIX=/work/build/fdk-aac-prefix
+    if [[ ! -f "$FDK_PREFIX/lib/libfdk-aac.a" ]]; then
       mkdir -p /work/build/fdk-aac
       cd /work/build/fdk-aac
       git clone --filter=blob:none https://github.com/mstorsjo/fdk-aac.git src
@@ -82,7 +87,7 @@ docker run --rm "${UIDARGS[@]}" \
       git checkout "$FDK_AAC_REF"
       ./autogen.sh
       ./configure \
-        --prefix="$FFBUILD_PREFIX" \
+        --prefix="$FDK_PREFIX" \
         --host="$FFBUILD_TOOLCHAIN" \
         --disable-shared \
         --enable-static \
@@ -91,6 +96,9 @@ docker run --rm "${UIDARGS[@]}" \
       make -j"$nproc_count"
       make install
     fi
+    # Make fdk-aac visible to FFmpeg's pkg-config / configure probes,
+    # alongside the image-provided $FFBUILD_PREFIX deps.
+    export PKG_CONFIG_PATH="$FDK_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
     # ── 2. Configure & build patched FFmpeg (jellyfin tree) ────────────
     cd /work/build
@@ -105,9 +113,9 @@ docker run --rm "${UIDARGS[@]}" \
     configure_flags=(
       --prefix=/work/install
       --pkg-config-flags=--static
-      --extra-cflags="-I$FFBUILD_PREFIX/include"
-      --extra-cxxflags="-I$FFBUILD_PREFIX/include"
-      --extra-ldflags="-L$FFBUILD_PREFIX/lib -pthread"
+      --extra-cflags="-I$FFBUILD_PREFIX/include -I$FDK_PREFIX/include"
+      --extra-cxxflags="-I$FFBUILD_PREFIX/include -I$FDK_PREFIX/include"
+      --extra-ldflags="-L$FFBUILD_PREFIX/lib -L$FDK_PREFIX/lib -pthread"
       --extra-libs="-lgomp"
       --cc="$CC" --cxx="$CXX" --ar="$AR" --ranlib="$RANLIB" --nm="$NM"
       --enable-gpl
