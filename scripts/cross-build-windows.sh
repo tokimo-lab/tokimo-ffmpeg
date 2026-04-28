@@ -163,8 +163,12 @@ docker run --rm "${UIDARGS[@]}" \
       --enable-amf
       # GPU: Intel QSV (modern oneVPL runtime)
       --enable-libvpl
-      # GPU: OpenCL ICD
-      --enable-opencl
+      # NOTE: --enable-opencl conflicts with jellyfin-ffmpeg patches when
+      # libvpl/QSV is also enabled (duplicate AV_PIX_FMT_QSV case in
+      # libavutil/hwcontext_opencl.c). Windows users get GPU decode/encode
+      # via NVENC/AMF/QSV/D3D11VA/DXVA2 + filtering via Vulkan/libplacebo
+      # which is the same surface jellyfin-ffmpeg-windows ships, so
+      # OpenCL is intentionally omitted here.
       # GPU: native Windows DirectX / Media Foundation backends
       --enable-d3d11va --enable-dxva2 --enable-mediafoundation
     )
