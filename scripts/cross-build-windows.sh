@@ -105,12 +105,19 @@ docker run --rm "${UIDARGS[@]}" \
     cd /work/build
     rm -rf ff && mkdir ff && cd ff
 
-    # Mirror the GPU-disabling stance of the existing Linux/macOS CI
-    # (no NVIDIA/AMF/Vulkan headers wired into our build matrix yet).
-    # The image *has* them, but jellyfin-ffmpeg patches expect specific
-    # versions and we keep parity with the other OSes for now.
-    # TODO(windows-gpu): re-enable AMF + ffnvcodec + libvpl + vulkan
-    #                    once the no-GPU build is green.
+    # GPU stack on Windows. The BtbN win64-gpl-shared image already ships
+    # all required headers / import libs at $FFBUILD_PREFIX:
+    #   - vulkan + libplacebo + libshaderc  (Vulkan compute / shader pipeline)
+    #   - ffnvcodec                          (NVIDIA NVENC / NVDEC / CUVID / CUDA)
+    #   - AMF                                (AMD Advanced Media Framework)
+    #   - libvpl                             (Intel oneVPL, modern QSV)
+    #   - OpenCL ICD loader                  (cross-vendor OpenCL filters)
+    #   - libva-win32                        (probed but not enabled — Windows
+    #                                         path is experimental in upstream)
+    # plus FFmpeg native Windows backends (D3D11VA / DXVA2 / Media Foundation)
+    # which need no external libs.
+    # libnpp is intentionally NOT enabled — requires NVIDIA Performance
+    # Primitives proprietary SDK which is not in the BtbN image.
     configure_flags=(
       --prefix=/work/install
       --pkg-config-flags=--static
@@ -146,6 +153,20 @@ docker run --rm "${UIDARGS[@]}" \
       # container / image / misc
       --enable-libbluray --enable-libwebp --enable-libzimg
       --enable-chromaprint --enable-libsrt --enable-libopenjpeg --enable-libjxl
+      --enable-libzvbi
+      # GPU: Vulkan + libplacebo
+      --enable-vulkan --enable-libplacebo --enable-libshaderc
+      # GPU: NVIDIA (NVENC / NVDEC / CUVID / CUDA via ffnvcodec headers)
+      --enable-ffnvcodec --enable-cuda --enable-cuda-llvm
+      --enable-cuvid --enable-nvdec --enable-nvenc
+      # GPU: AMD AMF
+      --enable-amf
+      # GPU: Intel QSV (modern oneVPL runtime)
+      --enable-libvpl
+      # GPU: OpenCL ICD
+      --enable-opencl
+      # GPU: native Windows DirectX / Media Foundation backends
+      --enable-d3d11va --enable-dxva2 --enable-mediafoundation
     )
 
     # shellcheck disable=SC2206  # FFBUILD_TARGET_FLAGS is intentionally word-split
