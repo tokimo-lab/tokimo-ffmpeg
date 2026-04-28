@@ -104,40 +104,6 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
-      # Harvest the rusty_ffmpeg-generated binding.rs so the Windows
-      # job can use it via FFMPEG_BINDING_PATH and skip its own bindgen
-      # invocation entirely. mingw clang on Windows otherwise emits
-      # AVFormatContext fields (pb / metadata / streams / iformat) as
-      # accessor methods due to _WIN32 / __MINGW32__ predefines, which
-      # rsmpeg 0.18 source code can't compile against.
-      #
-      # ABI assumption: FFmpeg's public structs that rsmpeg dereferences
-      # (AVFormatContext / AVCodecContext / AVFrame / AVStream / …) use
-      # explicitly-sized integer types (int64_t, uint32_t) for all
-      # numeric fields visible across the FFI boundary, so the Linux
-      # binding's `c_long = i64` vs mingw's actual `long = i32` mismatch
-      # does not hit any field rsmpeg actually touches. cargo test on
-      # the Windows job is the load-bearing verification.
-      - name: Locate ffmpeg binding for Windows job
-        run: |
-          set -euo pipefail
-          binding=$(find target -path '*/build/rusty_ffmpeg-*/out/binding.rs' -print -quit)
-          if [ -z "$binding" ]; then
-            echo "ERROR: rusty_ffmpeg binding.rs not found under target/" >&2
-            find target -name binding.rs 2>/dev/null | head -20 >&2
-            exit 1
-          fi
-          echo "Found: $binding ($(wc -l < "$binding") lines, $(wc -c < "$binding") bytes)"
-          cp "$binding" "$GITHUB_WORKSPACE/ffmpeg-binding.rs"
-
-      - name: Upload ffmpeg binding artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ffmpeg-binding-linux
-          path: ffmpeg-binding.rs
-          if-no-files-found: error
-          retention-days: 1
-
   # ─── macOS: full build + clippy + test ─────────────────────────
   macos:
     name: macos (build + clippy + test)
@@ -236,98 +202,36 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
-  # ─── Windows: msys2/clang64 build + clippy + test ──────────────
+
+  # ─── Windows cross-build (Linux runner, BtbN docker image) ─────
   #
-  # Strategy (Path A — pragmatic):
-  #   - Use msys2/setup-msys2 with msystem=CLANG64 (matches upstream
-  #     jellyfin-ffmpeg's Windows build environment).
-  #   - Install prebuilt mingw-w64-clang-x86_64-* dependency packages
-  #     via pacman instead of rebuilding the full 30+ PKGBUILD chain
-  #     from .vendors/ffmpeg/src/msys2/PKGBUILD/. This trades the
-  #     jellyfin-specific patches on those deps (lame/dav1d/svt-av1/…)
-  #     for ~hours of CI time. If a missing patch later breaks runtime
-  #     behaviour, we'll cherry-pick the affected PKGBUILD then.
-  #   - Reuse scripts/build-ffmpeg.sh in --patches-only mode so the
-  #     same patch-application logic (94 jellyfin debian patches +
-  #     2 tokimo local patches) is shared with Linux/macOS, then run
-  #     configure + make manually here with a Windows-appropriate
-  #     flag set (no NVIDIA / AMF / VAAPI / libdrm / pulse).
-  #   - Use msys2's mingw-w64-clang-x86_64-rust so the resulting
-  #     cargo target is x86_64-pc-windows-gnu, matching the FFmpeg
-  #     ABI we just built. Mixing MSVC-toolchain rust with mingw
-  #     FFmpeg would link-fail.
-  windows:
-    name: windows (build + clippy + test)
-    runs-on: windows-latest
-    needs: [fmt, linux]
-    defaults:
-      run:
-        shell: msys2 {0}
+  # Strategy (rsmpeg windows.md recommended path):
+  #   - Run on ubuntu-latest, NOT a Windows runner. Native MSYS2
+  #     builds were taking 40+ minutes per run and breaking on
+  #     bindgen ABI mismatch (CI runs 25024190034, 25025381651).
+  #   - Cross-compile the patched jellyfin-ffmpeg tree with
+  #     mingw-w64 GCC (x86_64-w64-mingw32) inside BtbN/FFmpeg-Builds'
+  #     `win64-gpl-shared:latest` image, which already ships every
+  #     codec dep we need (x264/x265/dav1d/svt-av1/aom/vpx/opus/lame/
+  #     vorbis/theora/openmpt/soxr/ass/freetype/fribidi/harfbuzz/
+  #     fontconfig/bluray/webp/zimg/srt/openjpeg/libjxl/chromaprint).
+  #   - Build fdk-aac from source inside the same container — BtbN
+  #     does not publish a `nonfree` variant publicly, but the toolchain
+  #     in the image is identical, so we get fdk-aac (~30s autotools
+  #     compile) without rebuilding anything else.
+  #   - Generate the rusty_ffmpeg binding.rs against the produced
+  #     mingw FFmpeg headers using bindgen-cli on the host with
+  #     `-target x86_64-w64-mingw32 -isystem /usr/x86_64-w64-mingw32`.
+  #     The Windows runner consumes this via FFMPEG_BINDING_PATH and
+  #     never invokes bindgen itself (avoids MSVC/mingw ABI mismatch).
+  #   - Upload `install-windows/` + `ffmpeg-binding-windows/binding.rs`
+  #     as artifacts for the `windows` job to download and link.
+  windows-build:
+    name: windows-build (cross via BtbN docker)
+    runs-on: ubuntu-latest
+    needs: fmt
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download ffmpeg binding from linux job
-        # download-artifact@v4 unpacks the single ffmpeg-binding.rs into
-        # ./ffmpeg-binding/ffmpeg-binding.rs at the workspace root, which
-        # we feed to rusty_ffmpeg's build.rs via FFMPEG_BINDING_PATH so
-        # mingw clang's bindgen invocation (which would otherwise emit
-        # accessor methods for AVFormatContext fields under _WIN32) is
-        # skipped entirely.
-        uses: actions/download-artifact@v4
-        with:
-          name: ffmpeg-binding-linux
-          path: ffmpeg-binding
-
-      - name: Setup MSYS2 (CLANG64)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: CLANG64
-          update: true
-          # Keep this list aligned with what scripts/build-ffmpeg.sh's
-          # append_if_pkg checks for. Anything missing just disables a
-          # codec at configure time — no hard failure — so it's safe to
-          # be generous here. Names verified against current msys2
-          # CLANG64 repo (December 2025); flag any future renames with
-          # `pacman -Ss <name>` inside an msys2 shell.
-          install: >-
-            base-devel
-            git
-            patch
-            diffutils
-            mingw-w64-clang-x86_64-toolchain
-            mingw-w64-clang-x86_64-pkgconf
-            mingw-w64-clang-x86_64-make
-            mingw-w64-clang-x86_64-nasm
-            mingw-w64-clang-x86_64-yasm
-            mingw-w64-clang-x86_64-meson
-            mingw-w64-clang-x86_64-ninja
-            mingw-w64-clang-x86_64-cmake
-            mingw-w64-clang-x86_64-rust
-            mingw-w64-clang-x86_64-x264
-            mingw-w64-clang-x86_64-x265
-            mingw-w64-clang-x86_64-dav1d
-            mingw-w64-clang-x86_64-svt-av1
-            mingw-w64-clang-x86_64-aom
-            mingw-w64-clang-x86_64-libvpx
-            mingw-w64-clang-x86_64-opus
-            mingw-w64-clang-x86_64-lame
-            mingw-w64-clang-x86_64-libvorbis
-            mingw-w64-clang-x86_64-libtheora
-            mingw-w64-clang-x86_64-libopenmpt
-            mingw-w64-clang-x86_64-libwebp
-            mingw-w64-clang-x86_64-libass
-            mingw-w64-clang-x86_64-libbluray
-            mingw-w64-clang-x86_64-fdk-aac
-            mingw-w64-clang-x86_64-fontconfig
-            mingw-w64-clang-x86_64-freetype
-            mingw-w64-clang-x86_64-fribidi
-            mingw-w64-clang-x86_64-harfbuzz
-            mingw-w64-clang-x86_64-zimg
-            mingw-w64-clang-x86_64-libsoxr
-            mingw-w64-clang-x86_64-srt
-            mingw-w64-clang-x86_64-openjpeg2
-            mingw-w64-clang-x86_64-libjxl
-            mingw-w64-clang-x86_64-chromaprint
 
       - name: Resolve jellyfin-ffmpeg HEAD (for cache key)
         id: ffmpeg_head
@@ -339,188 +243,171 @@ jobs:
           fi
           [ -n "$sha" ] || { echo "Could not resolve FFMPEG_REF=$FFMPEG_REF"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Resolved jellyfin-ffmpeg ${FFMPEG_REF} -> $sha"
 
-      - name: Cache FFmpeg build
+      - name: Cache cross-built FFmpeg + binding
         id: ffmpeg_cache
         uses: actions/cache@v4
         with:
           path: |
+            install-windows
+            ffmpeg-binding-windows
             ffmpeg-src
-            install
-          key: windows-clang64-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/extract-patches.sh', 'patches/local/**', '.github/workflows/ci.yml') }}
-          restore-keys: |
-            windows-clang64-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-
-            windows-clang64-ffmpeg-
+          # Bust on jellyfin HEAD, our scripts, patches, AND the
+          # workflow itself (so configure flag changes invalidate).
+          key: windows-cross-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/cross-build-windows.sh', 'scripts/gen-binding-windows.sh', 'patches/local/**', '.github/workflows/ci.yml') }}
 
-      - name: Apply jellyfin + tokimo patches
+      - name: Apply jellyfin + tokimo patches (--patches-only)
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
         run: |
-          set -euo pipefail
-          # build-ffmpeg.sh handles: clone jellyfin-ffmpeg, checkout ref,
-          # extract debian patches, apply 94 jellyfin debian patches,
-          # apply 2 tokimo patches in patches/local/. --patches-only
-          # exits before the Linux-specific third-party / configure /
-          # make steps, leaving ffmpeg-src/ ready for Windows configure.
           ./scripts/build-ffmpeg.sh --patches-only
 
-      - name: Configure & build FFmpeg (clang64)
+      - name: Cross-compile FFmpeg for win64 via BtbN docker
+        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        run: |
+          # Image is ~1.5GB compressed. Plain `docker pull` is fine on
+          # ubuntu-latest (cached across the run via overlay2 layer
+          # store within the job). cross-build-windows.sh re-pulls but
+          # that's a no-op once present.
+          ./scripts/cross-build-windows.sh
+
+      - name: Install bindgen-cli + mingw headers
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-
-          ROOT="$(pwd)"
-          SRC="$ROOT/ffmpeg-src"
-          BUILD="$ROOT/build"
-          INSTALL="$ROOT/install"
-
-          rm -rf "$BUILD"
-          mkdir -p "$BUILD" "$INSTALL"
-          cd "$BUILD"
-
-          # GPU vendor flags (NVIDIA/AMF/VAAPI/libdrm) intentionally
-          # omitted on the first Windows job iteration — they require
-          # nv-codec-headers / AMF SDK / libva, none of which the
-          # mingw repos ship out-of-the-box. Upstream jellyfin-ffmpeg's
-          # Windows build does enable AMF + ffnvcodec + libvpl, so this
-          # is a known capability gap. Tracked TODOs below.
-          # TODO(windows-gpu): add nv-codec-headers + AMF SDK + libvpl
-          #                    once the minimal build is green.
-
-          configure_flags=(
-            "--prefix=$INSTALL"
-            "--enable-gpl"
-            "--enable-version3"
-            "--enable-nonfree"
-            "--enable-shared"
-            "--disable-static"
-            "--enable-pic"
-            "--disable-doc"
-            "--disable-debug"
-            "--disable-ffplay"
-            "--enable-lto=auto"
-            "--extra-version=Jellyfin"
-            "--arch=x86_64"
-            "--target-os=mingw64"
-            "--cc=clang"
-            "--cxx=clang++"
-            "--ld=clang"
-            # video
-            "--enable-libx264"
-            "--enable-libx265"
-            "--enable-libdav1d"
-            "--enable-libsvtav1"
-            "--enable-libvpx"
-            "--enable-libaom"
-            # audio
-            "--enable-libopus"
-            "--enable-libvorbis"
-            "--enable-libmp3lame"
-            "--enable-libfdk-aac"
-            "--enable-libtheora"
-            "--enable-libopenmpt"
-            "--enable-libsoxr"
-            # subtitle / text
-            "--enable-libass"
-            "--enable-libfontconfig"
-            "--enable-libfreetype"
-            "--enable-libfribidi"
-            "--enable-libharfbuzz"
-            # container / image / misc
-            "--enable-libbluray"
-            "--enable-libwebp"
-            "--enable-libzimg"
-            "--enable-chromaprint"
-            "--enable-libsrt"
-            "--enable-libopenjpeg"
-            "--enable-libjxl"
-          )
-
-          export PKG_CONFIG_PATH="/clang64/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-          echo "Running configure with ${#configure_flags[@]} flags..."
-          if ! "$SRC/configure" "${configure_flags[@]}" > configure.log 2>&1; then
-            echo "Configure FAILED. Last 80 lines of configure.log:"
-            tail -80 configure.log
-            echo "---- ffbuild/config.log tail (if present) ----"
-            tail -120 ffbuild/config.log 2>/dev/null || true
-            exit 1
+          sudo apt-get update
+          # gcc-mingw-w64-x86-64 ships /usr/x86_64-w64-mingw32/include
+          # which gen-binding-windows.sh feeds to clang via -isystem.
+          # clang itself comes preinstalled on ubuntu-latest runners.
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 clang
+          # bindgen-cli compile is ~90s; cargo cache reused if present.
+          if ! command -v bindgen >/dev/null 2>&1; then
+            cargo install --locked bindgen-cli
           fi
-          tail -10 configure.log
 
-          # mingw-w64-clang-x86_64-make installs as `mingw32-make`; plain `make`
-          # comes from base-devel and works fine for FFmpeg's Makefile.
-          make -j"$(nproc)"
-          make install
-
-          ls -la "$INSTALL/lib/pkgconfig/" || true
-          ls -la "$INSTALL/bin/" | head -20 || true
+      - name: Generate Windows binding.rs (bindgen against mingw target)
+        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        run: ./scripts/gen-binding-windows.sh
 
       - name: Verify FFmpeg artifacts
         run: |
           set -euo pipefail
-          ls -la install/lib/pkgconfig/ || true
-          # ffmpeg.exe needs the codec DLLs in /clang64/bin on PATH at runtime.
-          export PATH="$(pwd)/install/bin:/clang64/bin:$PATH"
-          ./install/bin/ffmpeg.exe -hide_banner -version | head -3 || true
+          ls -la install-windows/bin install-windows/lib/pkgconfig install-windows/include
+          echo "binding.rs: $(wc -l < ffmpeg-binding-windows/binding.rs) lines, $(wc -c < ffmpeg-binding-windows/binding.rs) bytes"
 
-      - name: cargo fmt / clippy / build / test
-        env:
-          # rusty_ffmpeg's build.rs on target_os = "windows" only honors
-          # FFMPEG_LIBS_DIR (+ FFMPEG_INCLUDE_DIR for bindgen) — the
-          # `link_system_ffmpeg` feature path is gated to non-Windows,
-          # so PKG_CONFIG_PATH alone is not enough and configure panics
-          # with "No linking method set!".
-          #
-          # Point all three at our just-built install/ tree. We built
-          # shared (.dll.a + .dll), so FFMPEG_LINK_MODE=dynamic; the
-          # default would otherwise be Static and rustc would look for
-          # nonexistent libavcodec.lib static archives.
-          FFMPEG_LIBS_DIR: ${{ github.workspace }}\install\lib
-          FFMPEG_INCLUDE_DIR: ${{ github.workspace }}\install\include
-          FFMPEG_DLL_PATH: ${{ github.workspace }}\install\bin
-          FFMPEG_LINK_MODE: dynamic
-          # Kept so any other downstream crate (rsmpeg, etc.) that does
-          # consult pkg-config still finds our build.
-          FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
-          # Use the prebuilt binding.rs harvested from the Linux job
-          # instead of letting rusty_ffmpeg run bindgen on Windows. mingw
-          # clang predefines _WIN32 / __MINGW32__, which causes bindgen
-          # to emit accessor methods (and drop some fields entirely) for
-          # AVFormatContext members whose type is a pointer to a
-          # forward-declared composite — `pb`, `iformat`, `oformat`,
-          # `streams`, `nb_streams`, `metadata`. rsmpeg 0.18 source code
-          # accesses these as plain Rust fields via Deref, so the mismatch
-          # breaks compilation with 22 errors of the shape
-          # `no field 'pb' on type 'AVFormatContext'` /
-          # `attempted to take value of method 'metadata' on type
-          # '&AVFormatContextInput'` (CI run 25024190034).
-          #
-          # FFMPEG_BINDING_PATH is honored by rusty_ffmpeg 0.16.7
-          # build.rs at line 428-429 in dynamic_linking() — it short-
-          # circuits past generate_bindings() and copies the file as-is.
-          #
-          # ABI assumption: FFmpeg's public structs that rsmpeg
-          # dereferences use explicitly-sized integer types (int64_t /
-          # uint32_t / …) for all numeric fields, so the Linux binding's
-          # `c_long = i64` vs mingw `long = i32` mismatch does not hit
-          # any field rsmpeg touches. cargo test below is the load-
-          # bearing verification.
-          FFMPEG_BINDING_PATH: ${{ github.workspace }}\ffmpeg-binding\ffmpeg-binding.rs
+      - name: Upload Windows FFmpeg install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows-install
+          path: install-windows
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Windows binding.rs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows-binding
+          path: ffmpeg-binding-windows/binding.rs
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─── Windows: download cross artifacts, run cargo only ─────────
+  #
+  # No msys2, no native FFmpeg compile. The windows runner only:
+  #   1. Pulls the install-windows/ tree + binding.rs from windows-build
+  #   2. Sets up x86_64-pc-windows-gnu Rust toolchain
+  #   3. Adds mingw GCC to PATH for the linker (windows-latest already
+  #      ships mingw at C:\msys64\mingw64\bin and C:\ProgramData\
+  #      mingw64\mingw64\bin; we explicitly prepend the former so
+  #      `rustc -C linker=...` finds gcc.exe / ld.exe matching our
+  #      cross-built FFmpeg's mingw GCC 15 ABI).
+  #   4. Runs cargo {clippy,build,test} with FFMPEG_LIBS_DIR /
+  #      FFMPEG_INCLUDE_DIR / FFMPEG_DLL_PATH / FFMPEG_LINK_MODE /
+  #      FFMPEG_BINDING_PATH pointing at the downloaded artifacts.
+  windows:
+    name: windows (cargo build + clippy + test)
+    runs-on: windows-latest
+    needs: [fmt, windows-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download FFmpeg install
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-install
+          path: install-windows
+
+      - name: Download binding.rs
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-binding
+          path: ffmpeg-binding-windows
+
+      - name: Verify downloaded artifacts
+        shell: bash
         run: |
           set -euo pipefail
-          export PKG_CONFIG_PATH="$(pwd)/install/lib/pkgconfig:/clang64/lib/pkgconfig"
-          # Tests / built binaries need to load FFmpeg DLLs and the codec
-          # DLLs from the mingw runtime at execution time.
-          export PATH="$(pwd)/install/bin:/clang64/bin:$PATH"
+          ls -la install-windows/bin install-windows/lib install-windows/include | head -40
+          ls -la ffmpeg-binding-windows
+          # Sanity-check at least one core DLL + import lib are present.
+          test -f install-windows/bin/avcodec-*.dll || (echo "missing avcodec DLL"; exit 1)
+          test -f install-windows/lib/libavcodec.dll.a || (echo "missing libavcodec.dll.a"; exit 1)
+          test -f ffmpeg-binding-windows/binding.rs
 
-          # Use the rust toolchain shipped by msys2 (mingw GNU ABI) — it
-          # matches the FFmpeg we just linked. dtolnay/rust-toolchain
-          # would install MSVC-ABI rust, which would fail at link time.
-          rustc --version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Match the mingw GCC ABI we cross-compiled FFmpeg with.
+          # MSVC-ABI rust would fail at link time against mingw .dll.a
+          # import libs.
+          targets: x86_64-pc-windows-gnu
+          components: clippy, rustfmt
+
+      - name: Add MinGW to PATH (for x86_64-pc-windows-gnu linker)
+        shell: pwsh
+        run: |
+          # windows-latest ships MSYS2 at C:\msys64. Its mingw64 GCC is
+          # what `cargo build --target x86_64-pc-windows-gnu` invokes
+          # via rustc -C linker=. Prepend it explicitly so it wins over
+          # any older preinstalled mingw.
+          $mingw = "C:\msys64\mingw64\bin"
+          if (-not (Test-Path "$mingw\gcc.exe")) {
+            Write-Error "Expected MinGW GCC at $mingw\gcc.exe — windows-latest runner has changed; pin mingw via egor-tensin/setup-mingw."
+            exit 1
+          }
+          "$mingw" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: cargo fmt / clippy / build / test
+        shell: pwsh
+        env:
+          # rusty_ffmpeg's Windows path in build.rs only honors
+          # FFMPEG_LIBS_DIR (+ FFMPEG_INCLUDE_DIR) for linking; the
+          # `link_system_ffmpeg` feature is gated to non-Windows, so
+          # PKG_CONFIG_PATH alone produces "No linking method set!".
+          FFMPEG_LIBS_DIR: ${{ github.workspace }}\install-windows\lib
+          FFMPEG_INCLUDE_DIR: ${{ github.workspace }}\install-windows\include
+          FFMPEG_DLL_PATH: ${{ github.workspace }}\install-windows\bin
+          FFMPEG_LINK_MODE: dynamic
+          # Skip rusty_ffmpeg's bindgen invocation entirely — use the
+          # pre-generated binding.rs from the windows-build job, which
+          # was generated against mingw-w64 sysroot headers using
+          # `clang -target x86_64-w64-mingw32`. Avoids the windows-runner
+          # MSVC clang vs mingw GCC ABI mismatch.
+          FFMPEG_BINDING_PATH: ${{ github.workspace }}\ffmpeg-binding-windows\binding.rs
+        run: |
+          # FFmpeg DLLs need to be on PATH for tests (LoadLibrary fallback).
+          $env:PATH = "${{ github.workspace }}\install-windows\bin;" + $env:PATH
+          rustc --version --verbose
           cargo --version
+          gcc --version
 
           cargo fmt --all -- --check
-          cargo clippy --lib --bins --tests -- -D warnings
-          cargo build --lib --bins --tests
-          cargo test --lib --bins
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --target x86_64-pc-windows-gnu --lib --bins --tests -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --target x86_64-pc-windows-gnu --lib --bins --tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --target x86_64-pc-windows-gnu --lib --bins
+          exit $LASTEXITCODE
