@@ -425,13 +425,17 @@ fn scale_frame_sws(
 
 /// Map deprecated YUVJ* pixel formats to their YUV* equivalents.
 /// Returns `(canonical_fmt, is_full_range)`.
+///
+/// `AVCOL_RANGE_*` constants are bound as `u32` by bindgen on Linux but as
+/// `i32` on Windows-MSVC. Cast to `u32` explicitly so this works on both;
+/// the consumer immediately re-casts to `i32` when calling the C API.
 fn normalize_pix_fmt(fmt: ffi::AVPixelFormat) -> (ffi::AVPixelFormat, u32) {
     match fmt {
-        ffi::AV_PIX_FMT_YUVJ420P => (ffi::AV_PIX_FMT_YUV420P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ422P => (ffi::AV_PIX_FMT_YUV422P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ444P => (ffi::AV_PIX_FMT_YUV444P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ440P => (ffi::AV_PIX_FMT_YUV440P, ffi::AVCOL_RANGE_JPEG),
-        other => (other, ffi::AVCOL_RANGE_MPEG),
+        ffi::AV_PIX_FMT_YUVJ420P => (ffi::AV_PIX_FMT_YUV420P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ422P => (ffi::AV_PIX_FMT_YUV422P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ444P => (ffi::AV_PIX_FMT_YUV444P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ440P => (ffi::AV_PIX_FMT_YUV440P, ffi::AVCOL_RANGE_JPEG as u32),
+        other => (other, ffi::AVCOL_RANGE_MPEG as u32),
     }
 }
 

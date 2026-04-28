@@ -14,12 +14,19 @@ fn main() {
     // Always watch build.rs itself — this is the baseline rerun trigger.
     println!("cargo:rerun-if-changed=build.rs");
 
+    // GNU-ld rpath syntax (`-Wl,-rpath,...`) is only valid for non-MSVC linkers.
+    // MSVC uses /LIBPATH (covered by rustc-link-search) and resolves DLLs at
+    // runtime via PATH; emitting `-Wl,-rpath` to link.exe breaks the build.
+    let target_env_msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+
     for install_dir in &candidates {
         let lib_dir = install_dir.join("lib");
         if lib_dir.exists() {
             let lib_dir = lib_dir.canonicalize().unwrap_or(lib_dir.clone());
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+            if !target_env_msvc {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+            }
 
             // Watch lib dir + every libav* version.h so we re-run if FFmpeg is rebuilt.
             // This ensures rusty_ffmpeg's bindgen regenerates FFI bindings when any
@@ -51,6 +58,13 @@ fn main() {
 
             if std::env::var("FFMPEG_DYN_DIR").is_err() {
                 println!("cargo:rustc-env=FFMPEG_DYN_DIR={}", lib_dir.display());
+            }
+            // rusty_ffmpeg honors FFMPEG_LIBS_DIR as the explicit-path linking method
+            // (bypassing pkg-config / vcpkg feature flags). Setting it here lets the
+            // crate work uniformly on Windows-MSVC without the `link_vcpkg_ffmpeg`
+            // feature, as long as install/lib has the matching .lib import libs.
+            if std::env::var("FFMPEG_LIBS_DIR").is_err() {
+                println!("cargo:rustc-env=FFMPEG_LIBS_DIR={}", lib_dir.display());
             }
             let include_dir = install_dir.join("include");
             if include_dir.exists() && std::env::var("FFMPEG_INCLUDE_DIR").is_err() {

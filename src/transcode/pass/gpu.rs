@@ -229,6 +229,10 @@ pub(super) fn init_gpu_pipelines(
 }
 
 /// Return the `FFmpeg` codec ID for a named encoder, for placeholder stream setup.
-pub(super) fn placeholder_codec_id(codec_name: &str) -> u32 {
+///
+/// Returns the native `ffi::AVCodecID` type (which differs between platforms:
+/// `u32` on Linux bindgen, `i32` on MSVC bindgen). Callers assign it directly
+/// to `AVCodecContext::codec_id` so type compatibility is preserved.
+pub(super) fn placeholder_codec_id(codec_name: &str) -> ffi::AVCodecID {
     codec_id_for_encoder(codec_name)
 }
