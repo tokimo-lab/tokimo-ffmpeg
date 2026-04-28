@@ -108,7 +108,11 @@ pub struct DirectInput {
 }
 
 impl DirectInput {
-    /// Construct from a local file path using `FileExt::read_at` (true random-read syscall).
+    /// Construct from a local file path using a positional read syscall
+    /// (`pread` on Unix via [`std::os::unix::fs::FileExt::read_at`],
+    /// `ReadFile` with `OVERLAPPED.Offset` on Windows via
+    /// [`std::os::windows::fs::FileExt::seek_read`]). Both avoid the
+    /// shared cursor races of `seek` + `read`.
     pub fn from_local(
         path: impl AsRef<str>,
         size: u64,
@@ -116,11 +120,17 @@ impl DirectInput {
         readahead_bytes: Option<u64>,
     ) -> std::io::Result<Arc<Self>> {
         use std::fs::File;
+        #[cfg(unix)]
         use std::os::unix::fs::FileExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::FileExt;
         let file = Arc::new(File::open(path.as_ref())?);
         let read_at: crate::ReadAt = Arc::new(move |offset, max| {
             let mut buf = vec![0u8; max];
+            #[cfg(unix)]
             let n = file.read_at(&mut buf, offset)?;
+            #[cfg(windows)]
+            let n = file.seek_read(&mut buf, offset)?;
             buf.truncate(n);
             Ok(buf)
         });
