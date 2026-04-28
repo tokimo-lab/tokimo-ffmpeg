@@ -154,7 +154,7 @@ jobs:
           brew install \
             pkg-config nasm yasm meson ninja cmake gpatch \
             x264 x265 dav1d svt-av1 libvpx aom \
-            opus libvorbis lame fdk-aac theora libsoxr \
+            opus libvorbis lame fdk-aac theora libsoxr libopenmpt \
             libass freetype fribidi harfbuzz fontconfig \
             libbluray webp zimg chromaprint srt openjpeg jpeg-xl \
             zvbi
