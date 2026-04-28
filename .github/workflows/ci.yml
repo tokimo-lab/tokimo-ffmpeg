@@ -549,10 +549,14 @@ jobs:
             if [ -d "$pcdir" ]; then
               for pc in "$pcdir"/*.pc; do
                 [ -e "$pc" ] || continue
-                sed -i 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
+                sed -i \
+                  -e 's|^prefix=.*|prefix=${pcfiledir}/../..|' \
+                  -e 's|^libdir=.*|libdir=${prefix}/lib|' \
+                  -e 's|^includedir=.*|includedir=${prefix}/include|' \
+                  "$pc"
               done
-              echo "Rewrote prefix in ${pcdir}:"
-              grep -H '^prefix=' "$pcdir"/*.pc || true
+              echo "Rewrote prefix/libdir/includedir in ${pcdir}:"
+              grep -HE '^(prefix|libdir|includedir)=' "$pcdir"/*.pc || true
             else
               echo "No pkgconfig dir at ${pcdir}, skipping"
             fi
