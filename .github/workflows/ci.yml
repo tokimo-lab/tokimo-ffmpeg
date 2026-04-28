@@ -69,13 +69,12 @@ jobs:
       - name: Verify FFmpeg artifacts
         run: |
           ls -la install/lib/pkgconfig/
-          install/bin/ffmpeg -hide_banner -version | head -3 || true
-          echo "── hwaccels ──"
-          install/bin/ffmpeg -hide_banner -hwaccels || true
-          echo "── GPU encoders ──"
-          install/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -E '(nvenc|amf|vaapi|qsv|vulkan|videotoolbox)' || true
-          echo "── GPU decoders ──"
-          install/bin/ffmpeg -hide_banner -decoders 2>&1 | grep -E '(cuvid|nvdec|amf|qsv|vaapi|videotoolbox)' || true
+          echo "── GPU encoders / decoders / hwaccels linked into libavcodec ──"
+          # Use `strings` so verify works on cache-hit runs too (no runtime
+          # deps like libjack reinstalled). Same approach as Windows job.
+          strings install/lib/libavcodec.so.* 2>/dev/null \
+            | grep -oE '(h264_nvenc|hevc_nvenc|av1_nvenc|h264_amf|hevc_amf|av1_amf|h264_qsv|hevc_qsv|av1_qsv|h264_cuvid|hevc_cuvid|av1_cuvid|h264_vaapi|hevc_vaapi|av1_vaapi|h264_vulkan|hevc_vulkan|libplacebo)' \
+            | sort -u || true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -174,13 +173,10 @@ jobs:
       - name: Verify FFmpeg artifacts
         run: |
           ls -la install/lib/pkgconfig/
-          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -version | head -3 || true
-          echo "── hwaccels ──"
-          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -hwaccels || true
-          echo "── GPU encoders ──"
-          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -E '(nvenc|amf|vaapi|qsv|vulkan|videotoolbox)' || true
-          echo "── GPU decoders ──"
-          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -decoders 2>&1 | grep -E '(cuvid|nvdec|amf|qsv|vaapi|videotoolbox)' || true
+          echo "── GPU encoders / decoders / hwaccels linked into libavcodec ──"
+          strings install/lib/libavcodec.*.dylib 2>/dev/null \
+            | grep -oE '(h264_videotoolbox|hevc_videotoolbox|prores_videotoolbox|av1_videotoolbox|h264_vaapi|videotoolbox|opencl|libplacebo)' \
+            | sort -u || true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
