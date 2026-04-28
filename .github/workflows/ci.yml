@@ -119,11 +119,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ─── macOS: full build + clippy + test ─────────────────────────
+  # ─── macOS: full build + clippy + test (x86_64 + arm64) ────────
   macos:
-    name: macos (build + clippy + test)
-    runs-on: macos-latest
+    name: macos (${{ matrix.arch }}) build + clippy + test
+    runs-on: ${{ matrix.runner }}
     needs: fmt
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-13
+            brew_prefix: /usr/local
+          - arch: arm64
+            runner: macos-latest
+            brew_prefix: /opt/homebrew
     steps:
       - uses: actions/checkout@v4
 
@@ -143,21 +152,17 @@ jobs:
             install
             ffmpeg-src
             third-party
-          key: macos-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'patches/local/**') }}
+          key: macos-${{ matrix.arch }}-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'patches/local/**') }}
 
       - name: Install build dependencies (Homebrew)
         # Run unconditionally — even on ffmpeg cache hits. The cached
-        # install/lib/*.dylib have absolute LC_LOAD_DYLIB entries
-        # pointing at /opt/homebrew/opt/<dep>/lib/lib<dep>.<ver>.dylib
-        # (libvpx, fribidi, sdl2, chromaprint, libsoxr, …). On a fresh
-        # macos-latest runner with no brew packages installed, dyld
-        # aborts with "Library not loaded: /opt/homebrew/opt/libvpx/
-        # lib/libvpx.12.dylib" (signal: 6, SIGABRT) the moment any
-        # binary linking libavformat is loaded — including cargo test
-        # binaries (CI run 25025381651). Brew is a fast no-op on
-        # already-installed packages.
+        # install/lib/*.dylib have absolute LC_LOAD_DYLIB entries pointing
+        # at the Homebrew prefix for this arch (e.g. /opt/homebrew/opt/
+        # for arm64, /usr/local/opt/ for x86_64). On a fresh runner with
+        # no brew packages installed, dyld aborts with "Library not loaded"
+        # the moment any binary linking libavformat is loaded. Brew is a
+        # fast no-op on already-installed packages.
         run: |
-          # Core toolchain
           brew update
           brew install \
             pkg-config nasm yasm meson ninja cmake gpatch \
@@ -171,15 +176,13 @@ jobs:
       - name: Build patched FFmpeg (macOS)
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
         env:
-          # Expose Homebrew pkg-config so build-ffmpeg.sh's append_if_pkg detects libs.
-          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ matrix.brew_prefix }}/lib/pkgconfig
         run: |
           # macOS lacks libdrm/libva/libpulse/etc — build-ffmpeg.sh skips them via pkg-config.
           # NVIDIA / AMF are Linux/Windows-only and stay disabled. Vulkan is enabled
           # via MoltenVK (Vulkan-on-Metal): brew installs vulkan-headers, vulkan-loader,
           # molten-vk, libplacebo and shaderc, which configure auto-detects through
-          # pkg-config. The Vulkan-Headers third-party clone in build-ffmpeg.sh runs
-          # idempotently on top of that and is harmless when brew already provides ≥1.3.277.
+          # pkg-config.
           ./scripts/build-ffmpeg.sh --no-nvidia --no-amf
 
       - name: Verify FFmpeg artifacts
@@ -227,10 +230,10 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
-      - name: Upload macOS FFmpeg install
+      - name: Upload macOS FFmpeg install (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-macos-install
+          name: ffmpeg-macos-${{ matrix.arch }}-install
           path: install
           if-no-files-found: error
           retention-days: 1
@@ -470,11 +473,17 @@ jobs:
           name: ffmpeg-linux-install
           path: dist/linux/install
 
-      - name: Download macOS install
+      - name: Download macOS install (x86_64)
         uses: actions/download-artifact@v4
         with:
-          name: ffmpeg-macos-install
-          path: dist/macos/install
+          name: ffmpeg-macos-x86_64-install
+          path: dist/macos-x86_64/install
+
+      - name: Download macOS install (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-macos-arm64-install
+          path: dist/macos-arm64/install
 
       - name: Download Windows install
         uses: actions/download-artifact@v4
@@ -525,7 +534,11 @@ jobs:
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ffmpeg_sha="${{ steps.ffmpeg_head.outputs.sha }}"
           crate_sha="${GITHUB_SHA}"
-          for entry in "linux:dist/linux/install" "macos:dist/macos/install" "windows:dist/windows/install-windows"; do
+          for entry in \
+            "linux:dist/linux/install" \
+            "macos-x86_64:dist/macos-x86_64/install" \
+            "macos-arm64:dist/macos-arm64/install" \
+            "windows:dist/windows/install-windows"; do
             platform="${entry%%:*}"
             target_dir="${entry#*:}"
             cat > "${target_dir}/META.txt" <<META
@@ -544,7 +557,7 @@ jobs:
           # extract the tarball to any path. ${pcfiledir} is pkg-config's
           # builtin for "directory containing this .pc file"; our layout is
           # install/lib/pkgconfig/*.pc, so ../.. resolves back to install/.
-          for dir in dist/linux/install dist/macos/install dist/windows/install-windows; do
+          for dir in dist/linux/install dist/macos-x86_64/install dist/macos-arm64/install dist/windows/install-windows; do
             pcdir="${dir}/lib/pkgconfig"
             if [ -d "$pcdir" ]; then
               for pc in "$pcdir"/*.pc; do
@@ -567,9 +580,10 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zstd
-          ( cd dist/linux   && tar --zstd -cf ../install-linux.tar.zst   install )
-          ( cd dist/macos   && tar --zstd -cf ../install-macos.tar.zst   install )
-          ( cd dist/windows && tar --zstd -cf ../install-windows.tar.zst install-windows ffmpeg-binding-windows )
+          ( cd dist/linux         && tar --zstd -cf ../install-linux.tar.zst          install )
+          ( cd dist/macos-x86_64  && tar --zstd -cf ../install-macos-x86_64.tar.zst   install )
+          ( cd dist/macos-arm64   && tar --zstd -cf ../install-macos-arm64.tar.zst    install )
+          ( cd dist/windows       && tar --zstd -cf ../install-windows.tar.zst        install-windows ffmpeg-binding-windows )
           ls -la dist/*.tar.zst
 
       - name: Delete previous nightly release (if any)
@@ -592,5 +606,6 @@ jobs:
             - crate commit: ${{ github.sha }}
           files: |
             dist/install-linux.tar.zst
-            dist/install-macos.tar.zst
+            dist/install-macos-x86_64.tar.zst
+            dist/install-macos-arm64.tar.zst
             dist/install-windows.tar.zst
