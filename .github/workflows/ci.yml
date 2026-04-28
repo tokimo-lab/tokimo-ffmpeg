@@ -361,19 +361,14 @@ jobs:
           targets: x86_64-pc-windows-gnu
           components: clippy, rustfmt
 
-      - name: Add MinGW to PATH (for x86_64-pc-windows-gnu linker)
-        shell: pwsh
-        run: |
-          # windows-latest ships MSYS2 at C:\msys64. Its mingw64 GCC is
-          # what `cargo build --target x86_64-pc-windows-gnu` invokes
-          # via rustc -C linker=. Prepend it explicitly so it wins over
-          # any older preinstalled mingw.
-          $mingw = "C:\msys64\mingw64\bin"
-          if (-not (Test-Path "$mingw\gcc.exe")) {
-            Write-Error "Expected MinGW GCC at $mingw\gcc.exe — windows-latest runner has changed; pin mingw via egor-tensin/setup-mingw."
-            exit 1
-          }
-          "$mingw" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Install MinGW (for x86_64-pc-windows-gnu linker)
+        # windows-latest no longer reliably ships C:\msys64\mingw64. Pin
+        # mingw-w64 GCC via egor-tensin/setup-mingw so cargo's gnu target
+        # always finds gcc.exe regardless of runner image drift.
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+          static: 0
 
       - uses: Swatinem/rust-cache@v2
         with:
