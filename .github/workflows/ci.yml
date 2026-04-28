@@ -165,7 +165,16 @@ jobs:
           key: macos-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'patches/local/**') }}
 
       - name: Install build dependencies (Homebrew)
-        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        # Run unconditionally — even on ffmpeg cache hits. The cached
+        # install/lib/*.dylib have absolute LC_LOAD_DYLIB entries
+        # pointing at /opt/homebrew/opt/<dep>/lib/lib<dep>.<ver>.dylib
+        # (libvpx, fribidi, sdl2, chromaprint, libsoxr, …). On a fresh
+        # macos-latest runner with no brew packages installed, dyld
+        # aborts with "Library not loaded: /opt/homebrew/opt/libvpx/
+        # lib/libvpx.12.dylib" (signal: 6, SIGABRT) the moment any
+        # binary linking libavformat is loaded — including cargo test
+        # binaries (CI run 25025381651). Brew is a fast no-op on
+        # already-installed packages.
         run: |
           # Core toolchain
           brew update
