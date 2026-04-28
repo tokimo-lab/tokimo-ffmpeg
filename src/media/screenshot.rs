@@ -429,6 +429,7 @@ fn scale_frame_sws(
 /// `AVCOL_RANGE_*` constants are bound as `u32` by bindgen on Linux but as
 /// `i32` on Windows-MSVC. Cast to `u32` explicitly so this works on both;
 /// the consumer immediately re-casts to `i32` when calling the C API.
+#[allow(clippy::unnecessary_cast)] // cast required on Windows-MSVC, redundant on Linux
 fn normalize_pix_fmt(fmt: ffi::AVPixelFormat) -> (ffi::AVPixelFormat, u32) {
     match fmt {
         ffi::AV_PIX_FMT_YUVJ420P => (ffi::AV_PIX_FMT_YUV420P, ffi::AVCOL_RANGE_JPEG),
