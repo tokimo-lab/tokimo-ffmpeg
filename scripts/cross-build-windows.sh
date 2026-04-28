@@ -59,6 +59,7 @@ docker run --rm "${UIDARGS[@]}" \
   -v "$ROOT_DIR/build-windows":/work/build \
   -v "$INSTALL_DIR":/work/install \
   -e FDK_AAC_REF="$FDK_AAC_REF" \
+  -e FDK_PREFIX=/work/build/fdk-aac-prefix \
   -w /work \
   "$IMAGE" \
   bash -eo pipefail -c '
@@ -68,6 +69,7 @@ docker run --rm "${UIDARGS[@]}" \
     : "${FFBUILD_TARGET_FLAGS:?image must define FFBUILD_TARGET_FLAGS}"
     : "${CC:?image must define CC}"
 
+    : "${FDK_PREFIX:?must be set}"
     nproc_count=$(nproc)
 
     # ── 1. Build fdk-aac into a user-writable prefix ───────────────────
@@ -75,10 +77,9 @@ docker run --rm "${UIDARGS[@]}" \
     # We pin to the same commit BtbN uses in scripts.d/50-fdk-aac.sh so
     # the binding stays reproducible across runs.
     #
-    # Install prefix is /work/build/fdk-aac-prefix (host-mounted) — we
-    # cannot write to $FFBUILD_PREFIX (=/opt/ffbuild, root-owned) when
-    # the container runs as the host UID via -u $(id -u):$(id -g).
-    FDK_PREFIX=/work/build/fdk-aac-prefix
+    # Install prefix is FDK_PREFIX=/work/build/fdk-aac-prefix (host-mounted)
+    # — we cannot write to $FFBUILD_PREFIX (=/opt/ffbuild, root-owned)
+    # when the container runs as the host UID via -u $(id -u):$(id -g).
     if [[ ! -f "$FDK_PREFIX/lib/libfdk-aac.a" ]]; then
       mkdir -p /work/build/fdk-aac
       cd /work/build/fdk-aac
@@ -96,7 +97,7 @@ docker run --rm "${UIDARGS[@]}" \
       make -j"$nproc_count"
       make install
     fi
-    # Make fdk-aac visible to FFmpeg's pkg-config / configure probes,
+    # Make fdk-aac visible to FFmpegs pkg-config / configure probes,
     # alongside the image-provided $FFBUILD_PREFIX deps.
     export PKG_CONFIG_PATH="$FDK_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
