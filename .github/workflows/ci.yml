@@ -304,11 +304,12 @@ jobs:
           set -euo pipefail
           ls -la install-windows/bin install-windows/lib/pkgconfig install-windows/include
           echo "binding.rs: $(wc -l < ffmpeg-binding-windows/binding.rs) lines, $(wc -c < ffmpeg-binding-windows/binding.rs) bytes"
-          echo "── GPU symbols linked into ffmpeg.exe ──"
-          # Cannot run .exe in linux container without wine, so grep the binary
-          # for GPU codec symbol/feature names. Presence here = code path compiled in.
-          strings install-windows/bin/ffmpeg.exe \
-            | grep -oE '(h264_nvenc|hevc_nvenc|av1_nvenc|h264_amf|hevc_amf|av1_amf|h264_qsv|hevc_qsv|av1_qsv|h264_mf|hevc_mf|h264_cuvid|hevc_cuvid|av1_cuvid|d3d11va|dxva2|mediafoundation|libplacebo|vulkan|opencl)' \
+          echo "── GPU symbols linked into Windows FFmpeg DLLs ──"
+          # Cannot run .exe in linux container without wine, so grep the
+          # binaries for GPU codec symbol/feature names. Encoder names live
+          # in avcodec-*.dll (~80MB), not in the thin ffmpeg.exe wrapper.
+          strings install-windows/bin/avcodec-*.dll install-windows/bin/avfilter-*.dll install-windows/bin/avutil-*.dll install-windows/bin/ffmpeg.exe \
+            | grep -oE '(h264_nvenc|hevc_nvenc|av1_nvenc|h264_amf|hevc_amf|av1_amf|h264_qsv|hevc_qsv|av1_qsv|h264_mf|hevc_mf|h264_cuvid|hevc_cuvid|av1_cuvid|h264_vulkan|hevc_vulkan|d3d11va|dxva2|mediafoundation|libplacebo|vulkan)' \
             | sort -u || true
 
       - name: Upload Windows FFmpeg install
