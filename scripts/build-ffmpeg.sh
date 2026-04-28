@@ -174,8 +174,14 @@ if [[ "$ENABLE_NVIDIA" == "1" ]]; then
     git clone https://github.com/FFmpeg/nv-codec-headers.git "$NV_DIR"
   fi
   make -C "$NV_DIR" PREFIX="$TP_PREFIX" install
-  export PKG_CONFIG_PATH="$TP_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
   log "  nv-codec-headers installed"
+fi
+
+# Always expose third-party prefix to pkg-config / compiler search paths
+# (covers ffnvcodec.pc + Vulkan-Headers + future header-only deps).
+if [[ -d "$TP_PREFIX" ]]; then
+  export PKG_CONFIG_PATH="$TP_PREFIX/lib/pkgconfig:$TP_PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export CPATH="$TP_PREFIX/include:${CPATH:-}"
 fi
 
 # Vulkan headers (need >= 1.3.277 for FFmpeg, Ubuntu 24.04 ships 1.3.275)
