@@ -111,6 +111,14 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
+      - name: Upload Linux FFmpeg install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-linux-install
+          path: install
+          if-no-files-found: error
+          retention-days: 1
+
   # ─── macOS: full build + clippy + test ─────────────────────────
   macos:
     name: macos (build + clippy + test)
@@ -218,6 +226,14 @@ jobs:
           DYLD_FALLBACK_LIBRARY_PATH: ${{ github.workspace }}/install/lib
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
+
+      - name: Upload macOS FFmpeg install
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-macos-install
+          path: install
+          if-no-files-found: error
+          retention-days: 1
 
 
   # ─── Windows cross-build (Linux runner, BtbN docker image) ─────
@@ -430,3 +446,126 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --target x86_64-pc-windows-gnu --lib --bins
           exit $LASTEXITCODE
+
+  # ─── Release: package install/ tarballs and publish to GitHub ──
+  release:
+    name: release (publish tarballs)
+    runs-on: ubuntu-latest
+    needs: [linux, macos, windows-build, windows]
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    concurrency:
+      group: ffmpeg-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download Linux install
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-linux-install
+          path: dist/linux/install
+
+      - name: Download macOS install
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-macos-install
+          path: dist/macos/install
+
+      - name: Download Windows install
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-install
+          path: dist/windows/install-windows
+
+      - name: Download Windows binding
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-binding
+          path: dist/windows/ffmpeg-binding-windows
+
+      - name: Resolve jellyfin-ffmpeg HEAD sha
+        id: ffmpeg_head
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote https://github.com/jellyfin/jellyfin-ffmpeg.git "refs/heads/${FFMPEG_REF}" | awk '{print $1}')
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote https://github.com/jellyfin/jellyfin-ffmpeg.git "refs/tags/${FFMPEG_REF}" | awk '{print $1}')
+          fi
+          [ -n "$sha" ] || { echo "Could not resolve FFMPEG_REF=$FFMPEG_REF"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Determine release tag/mode
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            prerelease=false
+            make_latest=true
+          else
+            tag="nightly"
+            prerelease=true
+            make_latest=false
+          fi
+          short_sha="${GITHUB_SHA::7}"
+          echo "tag=${tag}"             >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "make_latest=${make_latest}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_ref_sha=${{ steps.ffmpeg_head.outputs.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Write META.txt for each platform
+        run: |
+          set -euo pipefail
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ffmpeg_sha="${{ steps.ffmpeg_head.outputs.sha }}"
+          crate_sha="${GITHUB_SHA}"
+          for entry in "linux:dist/linux/install" "macos:dist/macos/install" "windows:dist/windows/install-windows"; do
+            platform="${entry%%:*}"
+            target_dir="${entry#*:}"
+            cat > "${target_dir}/META.txt" <<META
+          ffmpeg_ref=${FFMPEG_REF}
+          ffmpeg_ref_sha=${ffmpeg_sha}
+          crate_sha=${crate_sha}
+          built_at=${built_at}
+          platform=${platform}
+          META
+          done
+
+      - name: Install zstd and package tarballs
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd
+          ( cd dist/linux   && tar --zstd -cf ../install-linux.tar.zst   install )
+          ( cd dist/macos   && tar --zstd -cf ../install-macos.tar.zst   install )
+          ( cd dist/windows && tar --zstd -cf ../install-windows.tar.zst install-windows ffmpeg-binding-windows )
+          ls -la dist/*.tar.zst
+
+      - name: Delete previous nightly release (if any)
+        if: steps.meta.outputs.tag == 'nightly'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete nightly --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.make_latest }}
+          name: ${{ steps.meta.outputs.tag == 'nightly' && format('Nightly ({0})', steps.meta.outputs.short_sha) || steps.meta.outputs.tag }}
+          body: |
+            Pre-built FFmpeg artifacts.
+            - jellyfin-ffmpeg ref: ${{ steps.meta.outputs.ffmpeg_ref_sha }}
+            - crate commit: ${{ github.sha }}
+          files: |
+            dist/install-linux.tar.zst
+            dist/install-macos.tar.zst
+            dist/install-windows.tar.zst
