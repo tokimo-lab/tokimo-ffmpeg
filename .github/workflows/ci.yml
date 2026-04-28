@@ -60,14 +60,22 @@ jobs:
       - name: Build patched FFmpeg
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
         run: |
-          # Disable NVIDIA / AMF / Vulkan on CI (no GPU drivers / SDKs preinstalled,
-          # and configure does not need them for our ffmpeg7_1 link surface).
-          ./scripts/build-ffmpeg.sh --no-nvidia --no-amf --no-vulkan
+          # Full GPU build: build-ffmpeg.sh auto-installs nv-codec-headers,
+          # Vulkan-Headers, and AMF headers into third-party/prefix and configure
+          # picks them up via pkg-config / CPATH. Linux runner already has libva,
+          # libplacebo, libshaderc, libvpl, OpenCL ICD via install-deps.sh.
+          ./scripts/build-ffmpeg.sh
 
       - name: Verify FFmpeg artifacts
         run: |
           ls -la install/lib/pkgconfig/
           install/bin/ffmpeg -hide_banner -version | head -3 || true
+          echo "── hwaccels ──"
+          install/bin/ffmpeg -hide_banner -hwaccels || true
+          echo "── GPU encoders ──"
+          install/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -E '(nvenc|amf|vaapi|qsv|vulkan|videotoolbox)' || true
+          echo "── GPU decoders ──"
+          install/bin/ffmpeg -hide_banner -decoders 2>&1 | grep -E '(cuvid|nvdec|amf|qsv|vaapi|videotoolbox)' || true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -149,7 +157,8 @@ jobs:
             x264 x265 dav1d svt-av1 libvpx aom \
             opus libvorbis lame fdk-aac theora libsoxr \
             libass freetype fribidi harfbuzz fontconfig \
-            libbluray webp zimg chromaprint srt openjpeg jpeg-xl
+            libbluray webp zimg chromaprint srt openjpeg jpeg-xl \
+            zvbi
 
       - name: Build patched FFmpeg (macOS)
         if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
@@ -166,6 +175,12 @@ jobs:
         run: |
           ls -la install/lib/pkgconfig/
           DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -version | head -3 || true
+          echo "── hwaccels ──"
+          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -hwaccels || true
+          echo "── GPU encoders ──"
+          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -E '(nvenc|amf|vaapi|qsv|vulkan|videotoolbox)' || true
+          echo "── GPU decoders ──"
+          DYLD_FALLBACK_LIBRARY_PATH="$PWD/install/lib" install/bin/ffmpeg -hide_banner -decoders 2>&1 | grep -E '(cuvid|nvdec|amf|qsv|vaapi|videotoolbox)' || true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -293,6 +308,12 @@ jobs:
           set -euo pipefail
           ls -la install-windows/bin install-windows/lib/pkgconfig install-windows/include
           echo "binding.rs: $(wc -l < ffmpeg-binding-windows/binding.rs) lines, $(wc -c < ffmpeg-binding-windows/binding.rs) bytes"
+          echo "── GPU symbols linked into ffmpeg.exe ──"
+          # Cannot run .exe in linux container without wine, so grep the binary
+          # for GPU codec symbol/feature names. Presence here = code path compiled in.
+          strings install-windows/bin/ffmpeg.exe \
+            | grep -oE '(h264_nvenc|hevc_nvenc|av1_nvenc|h264_amf|hevc_amf|av1_amf|h264_qsv|hevc_qsv|av1_qsv|h264_mf|hevc_mf|h264_cuvid|hevc_cuvid|av1_cuvid|d3d11va|dxva2|mediafoundation|libplacebo|vulkan|opencl)' \
+            | sort -u || true
 
       - name: Upload Windows FFmpeg install
         uses: actions/upload-artifact@v4
