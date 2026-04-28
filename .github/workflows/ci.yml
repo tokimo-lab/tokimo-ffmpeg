@@ -127,9 +127,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - arch: x86_64
-            runner: macos-13
-            brew_prefix: /usr/local
+          # TODO: x86_64 — macos-13 runner deprecated; re-enable when
+          # cross-compilation from arm64 runner is wired up.
+          # - arch: x86_64
+          #   runner: macos-13
+          #   brew_prefix: /usr/local
           - arch: arm64
             runner: macos-latest
             brew_prefix: /opt/homebrew
@@ -474,6 +476,8 @@ jobs:
           path: dist/linux/install
 
       - name: Download macOS install (x86_64)
+        # TODO: re-enable when x86_64 cross-compilation is wired up
+        if: false
         uses: actions/download-artifact@v4
         with:
           name: ffmpeg-macos-x86_64-install
@@ -536,7 +540,6 @@ jobs:
           crate_sha="${GITHUB_SHA}"
           for entry in \
             "linux:dist/linux/install" \
-            "macos-x86_64:dist/macos-x86_64/install" \
             "macos-arm64:dist/macos-arm64/install" \
             "windows:dist/windows/install-windows"; do
             platform="${entry%%:*}"
@@ -557,7 +560,7 @@ jobs:
           # extract the tarball to any path. ${pcfiledir} is pkg-config's
           # builtin for "directory containing this .pc file"; our layout is
           # install/lib/pkgconfig/*.pc, so ../.. resolves back to install/.
-          for dir in dist/linux/install dist/macos-x86_64/install dist/macos-arm64/install dist/windows/install-windows; do
+          for dir in dist/linux/install dist/macos-arm64/install dist/windows/install-windows; do
             pcdir="${dir}/lib/pkgconfig"
             if [ -d "$pcdir" ]; then
               for pc in "$pcdir"/*.pc; do
@@ -581,7 +584,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zstd
           ( cd dist/linux         && tar --zstd -cf ../install-linux.tar.zst          install )
-          ( cd dist/macos-x86_64  && tar --zstd -cf ../install-macos-x86_64.tar.zst   install )
           ( cd dist/macos-arm64   && tar --zstd -cf ../install-macos-arm64.tar.zst    install )
           ( cd dist/windows       && tar --zstd -cf ../install-windows.tar.zst        install-windows ffmpeg-binding-windows )
           ls -la dist/*.tar.zst
@@ -606,6 +608,5 @@ jobs:
             - crate commit: ${{ github.sha }}
           files: |
             dist/install-linux.tar.zst
-            dist/install-macos-x86_64.tar.zst
             dist/install-macos-arm64.tar.zst
             dist/install-windows.tar.zst
