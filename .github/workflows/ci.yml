@@ -537,6 +537,27 @@ jobs:
           META
           done
 
+      - name: Make .pc files relocatable
+        run: |
+          set -euo pipefail
+          # Rewrite prefix= in pkg-config files so downstream consumers can
+          # extract the tarball to any path. ${pcfiledir} is pkg-config's
+          # builtin for "directory containing this .pc file"; our layout is
+          # install/lib/pkgconfig/*.pc, so ../.. resolves back to install/.
+          for dir in dist/linux/install dist/macos/install dist/windows/install-windows; do
+            pcdir="${dir}/lib/pkgconfig"
+            if [ -d "$pcdir" ]; then
+              for pc in "$pcdir"/*.pc; do
+                [ -e "$pc" ] || continue
+                sed -i 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
+              done
+              echo "Rewrote prefix in ${pcdir}:"
+              grep -H '^prefix=' "$pcdir"/*.pc || true
+            else
+              echo "No pkgconfig dir at ${pcdir}, skipping"
+            fi
+          done
+
       - name: Install zstd and package tarballs
         run: |
           set -euo pipefail
