@@ -104,6 +104,40 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/install/lib/pkgconfig
         run: cargo test --lib --bins
 
+      # Harvest the rusty_ffmpeg-generated binding.rs so the Windows
+      # job can use it via FFMPEG_BINDING_PATH and skip its own bindgen
+      # invocation entirely. mingw clang on Windows otherwise emits
+      # AVFormatContext fields (pb / metadata / streams / iformat) as
+      # accessor methods due to _WIN32 / __MINGW32__ predefines, which
+      # rsmpeg 0.18 source code can't compile against.
+      #
+      # ABI assumption: FFmpeg's public structs that rsmpeg dereferences
+      # (AVFormatContext / AVCodecContext / AVFrame / AVStream / …) use
+      # explicitly-sized integer types (int64_t, uint32_t) for all
+      # numeric fields visible across the FFI boundary, so the Linux
+      # binding's `c_long = i64` vs mingw's actual `long = i32` mismatch
+      # does not hit any field rsmpeg actually touches. cargo test on
+      # the Windows job is the load-bearing verification.
+      - name: Locate ffmpeg binding for Windows job
+        run: |
+          set -euo pipefail
+          binding=$(find target -path '*/build/rusty_ffmpeg-*/out/binding.rs' -print -quit)
+          if [ -z "$binding" ]; then
+            echo "ERROR: rusty_ffmpeg binding.rs not found under target/" >&2
+            find target -name binding.rs 2>/dev/null | head -20 >&2
+            exit 1
+          fi
+          echo "Found: $binding ($(wc -l < "$binding") lines, $(wc -c < "$binding") bytes)"
+          cp "$binding" "$GITHUB_WORKSPACE/ffmpeg-binding.rs"
+
+      - name: Upload ffmpeg binding artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-binding-linux
+          path: ffmpeg-binding.rs
+          if-no-files-found: error
+          retention-days: 1
+
   # ─── macOS: full build + clippy + test ─────────────────────────
   macos:
     name: macos (build + clippy + test)
@@ -216,12 +250,24 @@ jobs:
   windows:
     name: windows (build + clippy + test)
     runs-on: windows-latest
-    needs: fmt
+    needs: [fmt, linux]
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download ffmpeg binding from linux job
+        # download-artifact@v4 unpacks the single ffmpeg-binding.rs into
+        # ./ffmpeg-binding/ffmpeg-binding.rs at the workspace root, which
+        # we feed to rusty_ffmpeg's build.rs via FFMPEG_BINDING_PATH so
+        # mingw clang's bindgen invocation (which would otherwise emit
+        # accessor methods for AVFormatContext fields under _WIN32) is
+        # skipped entirely.
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-binding-linux
+          path: ffmpeg-binding
 
       - name: Setup MSYS2 (CLANG64)
         uses: msys2/setup-msys2@v2
@@ -428,31 +474,30 @@ jobs:
           # Kept so any other downstream crate (rsmpeg, etc.) that does
           # consult pkg-config still finds our build.
           FFMPEG_PKG_CONFIG_PATH: ${{ github.workspace }}\install\lib\pkgconfig
-          # Force rusty_ffmpeg's runtime bindgen (build.rs lines 542-560,
-          # target_os="windows" branch with FFMPEG_LIBS_DIR + FFMPEG_INCLUDE_DIR
-          # set, calls generate_bindings()) to invoke clang as if it were
-          # targeting Linux. Without this, mingw clang predefines _WIN32 /
-          # __MINGW32__ which causes bindgen to emit accessor methods (and
-          # drop some fields entirely) for AVFormatContext members whose
-          # type is a pointer to a forward-declared composite — `pb`,
-          # `iformat`, `oformat`, `streams`, `nb_streams`, `metadata`.
-          # rsmpeg 0.18 source code accesses these as plain Rust fields via
-          # Deref, so the mismatch breaks compilation with 22 errors of the
-          # shape `no field 'pb' on type 'AVFormatContext'` /
+          # Use the prebuilt binding.rs harvested from the Linux job
+          # instead of letting rusty_ffmpeg run bindgen on Windows. mingw
+          # clang predefines _WIN32 / __MINGW32__, which causes bindgen
+          # to emit accessor methods (and drop some fields entirely) for
+          # AVFormatContext members whose type is a pointer to a
+          # forward-declared composite — `pb`, `iformat`, `oformat`,
+          # `streams`, `nb_streams`, `metadata`. rsmpeg 0.18 source code
+          # accesses these as plain Rust fields via Deref, so the mismatch
+          # breaks compilation with 22 errors of the shape
+          # `no field 'pb' on type 'AVFormatContext'` /
           # `attempted to take value of method 'metadata' on type
           # '&AVFormatContextInput'` (CI run 25024190034).
           #
-          # `--target=x86_64-unknown-linux-gnu` makes clang preprocess the
-          # FFmpeg headers identically to the Linux job (which is green),
-          # so the generated binding has the same field-vs-method shape
-          # that rsmpeg's source expects. `-isystem /clang64/include` keeps
-          # mingw's stdint.h / limits.h reachable so primitive width
-          # decisions still match the actual mingw FFmpeg DLLs at link
-          # time. ABI risk is bounded: `unsigned long` (4 vs 8 bytes)
-          # appears in `AVIOContext.checksum` but not in any public field
-          # of `AVFormatContext` / `AVFrame` / `AVCodecContext` that
-          # rsmpeg dereferences.
-          BINDGEN_EXTRA_CLANG_ARGS: "--target=x86_64-unknown-linux-gnu -isystem /clang64/include"
+          # FFMPEG_BINDING_PATH is honored by rusty_ffmpeg 0.16.7
+          # build.rs at line 428-429 in dynamic_linking() — it short-
+          # circuits past generate_bindings() and copies the file as-is.
+          #
+          # ABI assumption: FFmpeg's public structs that rsmpeg
+          # dereferences use explicitly-sized integer types (int64_t /
+          # uint32_t / …) for all numeric fields, so the Linux binding's
+          # `c_long = i64` vs mingw `long = i32` mismatch does not hit
+          # any field rsmpeg touches. cargo test below is the load-
+          # bearing verification.
+          FFMPEG_BINDING_PATH: ${{ github.workspace }}\ffmpeg-binding\ffmpeg-binding.rs
         run: |
           set -euo pipefail
           export PKG_CONFIG_PATH="$(pwd)/install/lib/pkgconfig:/clang64/lib/pkgconfig"
