@@ -54,7 +54,8 @@ jobs:
           key: linux-ffmpeg-${{ steps.ffmpeg_head.outputs.sha }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/install-deps.sh', 'patches/local/**') }}
 
       - name: Install build dependencies
-        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        # Always run: even on cache-hit we need runtime .so files in
+        # /usr/lib for the bundle-runtime-deps step to resolve via ldd.
         run: ./scripts/install-deps.sh
 
       - name: Build patched FFmpeg

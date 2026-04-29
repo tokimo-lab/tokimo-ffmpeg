@@ -87,7 +87,7 @@ bundled=0
 idx=0
 while (( idx < ${#queue[@]} )); do
   dep="${queue[$idx]}"
-  (( idx++ ))
+  idx=$((idx + 1))
 
   [[ -f "$dep" ]] || continue
   basename="$(basename "$dep")"
@@ -115,7 +115,7 @@ while (( idx < ${#queue[@]} )); do
 
   echo "  + $basename  (from $dep)"
   cp -L "$dep" "$LIB_DIR/$basename"
-  (( bundled++ ))
+  bundled=$((bundled + 1))
 
   # chase transitive deps of the just-copied lib
   while IFS= read -r trans; do
