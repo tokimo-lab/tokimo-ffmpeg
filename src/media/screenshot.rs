@@ -432,11 +432,11 @@ fn scale_frame_sws(
 #[allow(clippy::unnecessary_cast)] // cast required on Windows-MSVC, redundant on Linux
 fn normalize_pix_fmt(fmt: ffi::AVPixelFormat) -> (ffi::AVPixelFormat, u32) {
     match fmt {
-        ffi::AV_PIX_FMT_YUVJ420P => (ffi::AV_PIX_FMT_YUV420P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ422P => (ffi::AV_PIX_FMT_YUV422P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ444P => (ffi::AV_PIX_FMT_YUV444P, ffi::AVCOL_RANGE_JPEG),
-        ffi::AV_PIX_FMT_YUVJ440P => (ffi::AV_PIX_FMT_YUV440P, ffi::AVCOL_RANGE_JPEG),
-        other => (other, ffi::AVCOL_RANGE_MPEG),
+        ffi::AV_PIX_FMT_YUVJ420P => (ffi::AV_PIX_FMT_YUV420P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ422P => (ffi::AV_PIX_FMT_YUV422P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ444P => (ffi::AV_PIX_FMT_YUV444P, ffi::AVCOL_RANGE_JPEG as u32),
+        ffi::AV_PIX_FMT_YUVJ440P => (ffi::AV_PIX_FMT_YUV440P, ffi::AVCOL_RANGE_JPEG as u32),
+        other => (other, ffi::AVCOL_RANGE_MPEG as u32),
     }
 }
 
