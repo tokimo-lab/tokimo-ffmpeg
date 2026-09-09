@@ -99,7 +99,7 @@ pub fn init_video_filter<'graph>(
     buffersink_ctx.init_dict(&mut None)?;
 
     let filter_spec = if let Some(custom) = custom_filter {
-        CString::new(custom)?
+        CString::new(append_software_resolution(custom, resolution))?
     } else if let Some((w, h)) = resolution {
         CString::new(format!("scale={w}:{h}"))?
     } else {
@@ -247,6 +247,30 @@ fn rewrite_cpu_format_for_hw(chain: &str, hw_scale: &str) -> String {
         .join(",")
 }
 
+fn append_software_resolution(chain: &str, resolution: Option<(i32, i32)>) -> String {
+    resolution.map_or_else(
+        || chain.to_string(),
+        |(width, height)| format!("{chain},scale=w={width}:h={height}"),
+    )
+}
+
+fn append_hardware_resolution(
+    chain: &str,
+    backend: FilterBackend,
+    decode_hw: HwType,
+    resolution: Option<(i32, i32)>,
+) -> String {
+    let Some((width, height)) = resolution else {
+        return chain.to_string();
+    };
+    let scale = if chain.contains("hwdownload") {
+        "scale"
+    } else {
+        backend.scale_filter(Some(decode_hw))
+    };
+    format!("{chain},{scale}=w={width}:h={height}")
+}
+
 /// Build the `FFmpeg` filter spec string for the given pipeline configuration.
 fn build_filter_spec(params: &HwFilterParams) -> String {
     // User-provided custom filter takes priority
@@ -254,6 +278,8 @@ fn build_filter_spec(params: &HwFilterParams) -> String {
         return match params.filter_backend {
             FilterBackend::OpenCL => {
                 // Wrap with hwmap bridge: decode_hw → opencl → [custom] → hwmap back
+                let custom =
+                    append_hardware_resolution(custom, params.filter_backend, params.decode_hw, params.resolution);
                 format!(
                     "hwmap=derive_device=opencl,{},hwmap=derive_device={},format={}",
                     custom,
@@ -262,6 +288,8 @@ fn build_filter_spec(params: &HwFilterParams) -> String {
                 )
             }
             FilterBackend::Vulkan => {
+                let custom =
+                    append_hardware_resolution(custom, params.filter_backend, params.decode_hw, params.resolution);
                 format!(
                     "hwmap=derive_device=vulkan,{},hwmap=derive_device={},format={}",
                     custom,
@@ -274,9 +302,12 @@ fn build_filter_spec(params: &HwFilterParams) -> String {
                 // can't process GPU frames. Rewrite to the HW scale equivalent
                 // (e.g. scale_cuda=format=yuv420p).
                 let scale = params.filter_backend.scale_filter(Some(params.decode_hw));
-                rewrite_cpu_format_for_hw(custom, scale)
+                let rewritten = rewrite_cpu_format_for_hw(custom, scale);
+                append_hardware_resolution(&rewritten, params.filter_backend, params.decode_hw, params.resolution)
             }
-            FilterBackend::Software => custom.to_string(),
+            FilterBackend::Software => {
+                append_hardware_resolution(custom, params.filter_backend, params.decode_hw, params.resolution)
+            }
         };
     }
 
@@ -477,6 +508,40 @@ mod tests {
         assert_eq!(
             rewrite_cpu_format_for_hw("format=nv12", "scale_vaapi"),
             "scale_vaapi=format=nv12"
+        );
+    }
+
+    #[test]
+    fn test_custom_software_filter_keeps_resolution() {
+        assert_eq!(
+            append_software_resolution("format=yuv420p", Some((854, 480))),
+            "format=yuv420p,scale=w=854:h=480"
+        );
+    }
+
+    #[test]
+    fn test_custom_cuda_filter_keeps_resolution_on_gpu() {
+        assert_eq!(
+            append_hardware_resolution(
+                "tonemap_cuda=format=yuv420p",
+                FilterBackend::Native,
+                HwType::Cuda,
+                Some((1280, 720)),
+            ),
+            "tonemap_cuda=format=yuv420p,scale_cuda=w=1280:h=720"
+        );
+    }
+
+    #[test]
+    fn test_hwdownload_uses_software_scale() {
+        assert_eq!(
+            append_hardware_resolution(
+                "hwdownload,format=yuv420p",
+                FilterBackend::Native,
+                HwType::Cuda,
+                Some((640, 360)),
+            ),
+            "hwdownload,format=yuv420p,scale=w=640:h=360"
         );
     }
 }
